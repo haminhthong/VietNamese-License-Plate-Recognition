@@ -1,174 +1,69 @@
-"""Tiền xử lý ảnh biển số, trích xuất OCR và hậu xử lý khớp mẫu định dạng biển số xe Việt Nam.
+"""Tiền xử lý ảnh biển số, trích xuất raw OCR và chuẩn bị evidence cho policy.
 
 Module này chịu trách nhiệm:
-1. Xử lý nhiều biến thể ảnh (Gray, CLAHE, Otsu, Adaptive Threshold) để EasyOCR có tỷ lệ đọc cao nhất.
+1. Chạy fast path Gray/CLAHE và chỉ fallback khi evidence chưa đủ.
 2. Xác định bố cục biển 1 dòng (ô tô dài) hoặc 2 dòng (xe máy, ô tô ngắn) dựa trên aspect ratio.
 3. Sắp xếp các token nhận dạng được theo đúng thứ tự hình học (từ trên xuống dưới, từ trái sang phải).
-4. Chuẩn hóa chuỗi ký tự, thay thế các lỗi nhận dạng phổ biến (nhầm lẫn giữa 'O' và '0', 'B' và '8', 'I' và '1', v.v.).
-5. Khớp các mẫu định dạng biển số tiêu chuẩn Việt Nam để sửa lỗi tối ưu.
+4. Chọn raw candidate theo consensus rồi mới gọi grammar để tạo suggestion.
+5. Không tự động ghi đè raw OCR bằng kết quả grammar.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
 
 from .config import RecognitionConfig
+from .decision import decide_plate
+from .grammar import (
+    DEFAULT_DIGIT_SUBSTITUTIONS,
+    DEFAULT_LETTER_SUBSTITUTIONS,
+    DEFAULT_PLATE_TEMPLATES,
+    DIGIT_SUBSTITUTIONS,
+    LETTER_SUBSTITUTIONS,
+    PLATE_TEMPLATES,
+    load_ocr_substitutions,
+    load_plate_templates,
+    normalize_plate_text,
+)
+from .grammar import fit_plate_template as _fit_plate_template
+from .grammar import validate_and_correct_plate as validate_plate_format
 from .rectification import rectify_plate
 
-# Bộ ký tự hợp lệ và phép thay thế chuẩn hóa
+# Bộ ký tự cho phép EasyOCR trả về.
 ASCII_DIGITS = "0123456789"
 ASCII_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 OCR_ALLOWLIST = f"{ASCII_DIGITS}{ASCII_LETTERS}-."
 VALID_LAYOUTS = {"1_line", "2_line"}
 
-# Từ điển thay thế mặc định (fallback)
-DEFAULT_DIGIT_SUBSTITUTIONS = {
-    "O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "Z": "2",
-    "J": "3", "A": "4", "S": "5", "G": "6", "B": "8",
-}
-DEFAULT_LETTER_SUBSTITUTIONS = {"0": "O", "1": "I", "2": "Z", "4": "A", "5": "S", "8": "B"}
-
-DEFAULT_PLATE_TEMPLATES = {
-    7: ["DDLDDDD"],                  # Ví dụ: 51F1234 (7 ký tự)
-    8: ["DDLDDDDD"],                 # Ví dụ: 51F12345 (8 ký tự)
-    9: ["DDLDDDDDD", "DDLLDDDDD"],   # Ví dụ: 51F123456 hoặc 51AB12345 (9 ký tự)
-    10: ["DDLLDDDDDD"],              # Ví dụ: 51AB123456 (10 ký tự)
-}
-
-
-def load_plate_templates() -> dict[int, list[str]]:
-    """Nạp mẫu quy tắc biển số xe từ resources/plate_templates.yaml hoặc dùng mặc định."""
-    resource_path = Path(__file__).resolve().parent.parent / "resources" / "plate_templates.yaml"
-    if resource_path.is_file():
-        try:
-            payload = yaml.safe_load(resource_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict) and "templates" in payload:
-                return {int(key): list(value) for key, value in payload["templates"].items()}
-        except Exception:
-            pass
-    return DEFAULT_PLATE_TEMPLATES
-
-
-def load_ocr_substitutions() -> tuple[dict[str, str], dict[str, str]]:
-    """Nạp từ điển thay thế ký tự từ resources/ocr_confusions.yaml hoặc dùng mặc định."""
-    resource_path = Path(__file__).resolve().parent.parent / "resources" / "ocr_confusions.yaml"
-    if resource_path.is_file():
-        try:
-            payload = yaml.safe_load(resource_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                digit_subs = payload.get("digit_substitutions", DEFAULT_DIGIT_SUBSTITUTIONS)
-                letter_subs = payload.get("letter_substitutions", DEFAULT_LETTER_SUBSTITUTIONS)
-                return dict(digit_subs), dict(letter_subs)
-        except Exception:
-            pass
-    return DEFAULT_DIGIT_SUBSTITUTIONS, DEFAULT_LETTER_SUBSTITUTIONS
-
-
-PLATE_TEMPLATES = load_plate_templates()
-DIGIT_SUBSTITUTIONS, LETTER_SUBSTITUTIONS = load_ocr_substitutions()
-
-
-def normalize_plate_text(text: str) -> str:
-    """Chuẩn hóa chuỗi ký tự: Chuyển thành viết hoa và loại bỏ các ký tự không thuộc ASCII chữ cái/số.
-
-    Args:
-        text (str): Chuỗi đầu vào.
-
-    Returns:
-        str: Chuỗi chỉ chứa chữ cái Latin viết hoa A-Z và chữ số 0-9.
-    """
-    allowed = set(ASCII_DIGITS + ASCII_LETTERS)
-    return "".join(character for character in str(text).upper() if character in allowed)
+# Các tên grammar được re-export để notebook/CLI cũ tiếp tục hoạt động.
+__all__ = [
+    "DEFAULT_DIGIT_SUBSTITUTIONS",
+    "DEFAULT_LETTER_SUBSTITUTIONS",
+    "DEFAULT_PLATE_TEMPLATES",
+    "DIGIT_SUBSTITUTIONS",
+    "LETTER_SUBSTITUTIONS",
+    "PLATE_TEMPLATES",
+    "fit_plate_template",
+    "infer_plate_layout",
+    "load_ocr_substitutions",
+    "load_plate_templates",
+    "normalize_plate_text",
+    "order_ocr_tokens",
+    "preprocess_plate_variants",
+    "read_plate",
+    "evaluate_plate_reliability",
+    "validate_and_correct_plate",
+]
 
 
 def fit_plate_template(raw_text: str, template: str) -> dict[str, Any] | None:
-    """Khớp chuỗi văn bản nhận dạng với một template mẫu và tính toán chi phí sửa lỗi (correction cost).
-
-    Args:
-        raw_text (str): Chuỗi OCR thô đã chuẩn hóa.
-        template (str): Chuỗi mẫu quy định dạng 'DDLDDDD' (D: Chữ số, L: Chữ cái).
-
-    Returns:
-        dict[str, Any] | None: Kết quả sau khi sửa lỗi hoặc None nếu không khớp độ dài.
-    """
-    raw_text = normalize_plate_text(raw_text)
-    if len(raw_text) != len(template):
+    """Khớp template và giữ alias ``text`` cho code cũ."""
+    result = _fit_plate_template(raw_text, template)
+    if result is None:
         return None
-    output: list[str] = []
-    correction_cost = 0.0
-    for character, expected_type in zip(raw_text, template, strict=True):
-        substitutions = DIGIT_SUBSTITUTIONS if expected_type == "D" else LETTER_SUBSTITUTIONS
-        is_valid = character in ASCII_DIGITS if expected_type == "D" else character in ASCII_LETTERS
-        if is_valid:
-            output.append(character)
-        elif character in substitutions:
-            output.append(substitutions[character])
-            correction_cost += 1.0
-        else:
-            return None
-    return {"text": "".join(output), "template": template, "correction_cost": correction_cost}
-
-
-def validate_and_correct_plate(
-    raw_text: str,
-    enable_correction: bool = True,
-    max_cost: float = 1.0,
-) -> dict[str, Any]:
-    """Kiểm tra tính hợp lệ và tự động hiệu chỉnh kết quả OCR theo các quy tắc định dạng biển số xe.
-
-    Args:
-        raw_text (str): Chuỗi ký tự nhận dạng thô.
-        enable_correction (bool): Có bật tự động sửa ký tự nhầm lẫn hay không.
-        max_cost (float): Giới hạn chi phí hiệu chỉnh tối đa.
-
-    Returns:
-        dict[str, Any]: Kết quả chi tiết bao gồm chuỗi thô, chuỗi đã sửa, cờ format_valid, cờ correction_applied,
-                        cờ needs_manual_review và chi phí sửa.
-    """
-    normalized = normalize_plate_text(raw_text)
-    candidates = [
-        result
-        for template in PLATE_TEMPLATES.get(len(normalized), [])
-        if (result := fit_plate_template(normalized, template)) is not None
-    ]
-    if not candidates:
-        return {
-            "raw_text": normalized,
-            "text": normalized,
-            "format_valid": False,
-            "template": None,
-            "correction_cost": 0.0,
-            "correction_applied": False,
-            "needs_manual_review": True,
-        }
-
-    best = min(candidates, key=lambda item: item["correction_cost"])
-    if not enable_correction:
-        # Nếu tắt hiệu chỉnh template, giữ nguyên raw_text nhưng thông báo nếu raw_text vốn đã chuẩn format (cost == 0)
-        is_exact = best["correction_cost"] == 0.0
-        return {
-            "raw_text": normalized,
-            "text": normalized,
-            "format_valid": is_exact,
-            "template": best["template"] if is_exact else None,
-            "correction_cost": 0.0,
-            "correction_applied": False,
-            "needs_manual_review": not is_exact,
-        }
-
-    correction_applied = best["text"] != normalized
-    needs_manual_review = best["correction_cost"] > max_cost
-    return {
-        "raw_text": normalized,
-        "format_valid": True,
-        "correction_applied": correction_applied,
-        "needs_manual_review": needs_manual_review,
-        **best,
-    }
+    return {**result, "text": result["suggested_text"]}
 
 
 def _token_geometry(bbox: list[list[float]]) -> dict[str, float]:
@@ -183,7 +78,9 @@ def _token_geometry(bbox: list[list[float]]) -> dict[str, float]:
     }
 
 
-def order_ocr_tokens(ocr_results: list, layout: str, minimum_confidence: float = 0.20) -> tuple[str, float, list[dict[str, Any]]]:
+def order_ocr_tokens(
+    ocr_results: list, layout: str, minimum_confidence: float = 0.20
+) -> tuple[str, float, list[dict[str, Any]]]:
     """Lọc các token nhiễu và sắp xếp theo đúng thứ tự đọc dựa trên bố cục 1 dòng hoặc 2 dòng.
 
     Returns:
@@ -197,11 +94,13 @@ def order_ocr_tokens(ocr_results: list, layout: str, minimum_confidence: float =
     for bbox, text, confidence in ocr_results:
         normalized = normalize_plate_text(text)
         if normalized and float(confidence) >= minimum_confidence:
-            tokens.append({
-                "text": normalized,
-                "confidence": float(confidence),
-                **_token_geometry(bbox),
-            })
+            tokens.append(
+                {
+                    "text": normalized,
+                    "confidence": float(confidence),
+                    **_token_geometry(bbox),
+                }
+            )
     if not tokens:
         return "", 0.0, []
 
@@ -216,10 +115,12 @@ def order_ocr_tokens(ocr_results: list, layout: str, minimum_confidence: float =
         ordered = sorted(tokens, key=lambda token: token["center_x"])
 
     text = "".join(token["text"] for token in ordered)
-    confidence = float(np.average(
-        [token["confidence"] for token in ordered],
-        weights=[max(1, len(token["text"])) for token in ordered],
-    ))
+    confidence = float(
+        np.average(
+            [token["confidence"] for token in ordered],
+            weights=[max(1, len(token["text"])) for token in ordered],
+        )
+    )
     return text, confidence, ordered
 
 
@@ -242,11 +143,7 @@ def _order_two_line_tokens(tokens: list[dict[str, Any]], median_height: float) -
         ]
     non_empty_rows = [row for row in rows if row]
     non_empty_rows.sort(key=lambda row: np.mean([token["center_y"] for token in row]))
-    return [
-        token
-        for row in non_empty_rows
-        for token in sorted(row, key=lambda token: token["center_x"])
-    ]
+    return [token for row in non_empty_rows for token in sorted(row, key=lambda token: token["center_x"])]
 
 
 def preprocess_plate_variants(crop_bgr: np.ndarray) -> dict[str, np.ndarray]:
@@ -283,12 +180,115 @@ def infer_plate_layout(
     # Tinh chỉnh dựa trên cụm tọa độ Y-center của token nếu có
     if tokens and len(tokens) >= 2:
         sorted_by_y = sorted(tokens, key=lambda t: t["center_y"])
-        y_gaps = [sorted_by_y[i + 1]["center_y"] - sorted_by_y[i]["center_y"] for i in range(len(sorted_by_y) - 1)]
+        y_gaps = [
+            sorted_by_y[i + 1]["center_y"] - sorted_by_y[i]["center_y"] for i in range(len(sorted_by_y) - 1)
+        ]
         median_h = float(np.median([t["height"] for t in tokens]))
         if max(y_gaps, default=0.0) >= 0.25 * median_h:
             return "2_line"
 
     return initial_layout
+
+
+def _variant_images(crop_bgr: np.ndarray, names: tuple[str, ...]) -> dict[str, np.ndarray]:
+    """Tạo đúng các biến thể được yêu cầu, tránh chạy thừa EasyOCR."""
+    if "crop" in names:
+        return {"crop": crop_bgr}
+    all_variants = preprocess_plate_variants(crop_bgr)
+    return {name: all_variants[name] for name in names if name in all_variants}
+
+
+def _run_ocr_variant(
+    reader: Any,
+    image: np.ndarray,
+    variant_name: str,
+    config: RecognitionConfig,
+    rectified: bool,
+    layout_hint: str = "auto",
+) -> dict[str, Any]:
+    """Đọc một biến thể và thực hiện layout hai lượt dựa trên hình học token."""
+    initial_layout = (
+        layout_hint
+        if layout_hint in VALID_LAYOUTS
+        else infer_plate_layout(image, config.wide_ratio_threshold)
+    )
+    results = reader.readtext(image, detail=1, paragraph=False, allowlist=OCR_ALLOWLIST)
+
+    # Lượt 1 dùng aspect ratio làm gợi ý; lượt 2 dùng Y-clustering của token.
+    first_text, first_confidence, first_tokens = order_ocr_tokens(
+        results,
+        initial_layout,
+        minimum_confidence=config.ocr_minimum_confidence,
+    )
+    final_layout = infer_plate_layout(
+        image,
+        config.wide_ratio_threshold,
+        tokens=first_tokens,
+    )
+    if final_layout != initial_layout:
+        raw_text, confidence, tokens = order_ocr_tokens(
+            results,
+            final_layout,
+            minimum_confidence=config.ocr_minimum_confidence,
+        )
+    else:
+        raw_text, confidence, tokens = first_text, first_confidence, first_tokens
+
+    return {
+        "raw_text": raw_text,
+        "ocr_confidence": confidence,
+        "layout": final_layout,
+        "variant": variant_name,
+        "rectified": rectified,
+        "tokens": tokens,
+    }
+
+
+def _select_by_consensus(candidates: list[dict[str, Any]]) -> tuple[dict[str, Any], float]:
+    """Chọn raw text theo số phiếu, sau đó mới dùng OCR confidence để phá hòa."""
+    non_empty = [candidate for candidate in candidates if candidate["raw_text"]]
+    if not non_empty:
+        return max(
+            candidates,
+            key=lambda item: item["ocr_confidence"],
+            default={"raw_text": "", "ocr_confidence": 0.0, "layout": "1_line"},
+        ), 0.0
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for candidate in non_empty:
+        groups.setdefault(candidate["raw_text"], []).append(candidate)
+    chosen_text, chosen_group = max(
+        groups.items(),
+        key=lambda item: (
+            len(item[1]),
+            sum(candidate["ocr_confidence"] for candidate in item[1]) / len(item[1]),
+            max(candidate["ocr_confidence"] for candidate in item[1]),
+        ),
+    )
+    selected = max(chosen_group, key=lambda item: item["ocr_confidence"])
+    # Mẫu không đọc được vẫn là một phiếu thất bại, nên mẫu số là tổng số pass.
+    return selected, len(groups[chosen_text]) / len(candidates)
+
+
+def _has_enough_evidence(candidates: list[dict[str, Any]], config: RecognitionConfig) -> bool:
+    """Kiểm tra fast path đã đủ evidence để không cần fallback tốn thời gian."""
+    if not candidates:
+        return False
+    selected, consensus = _select_by_consensus(candidates)
+    return bool(
+        selected.get("raw_text")
+        and selected["ocr_confidence"] >= config.ocr_threshold
+        and consensus >= config.ocr_consensus_threshold
+    )
+
+
+def validate_and_correct_plate(
+    raw_text: str,
+    enable_correction: bool = True,
+    max_cost: float = 1.0,
+) -> dict[str, Any]:
+    """Alias tương thích tới grammar v1; sửa lỗi chỉ là đề xuất."""
+    return validate_plate_format(raw_text, enable_correction=enable_correction, max_cost=max_cost)
 
 
 def evaluate_plate_reliability(
@@ -299,32 +299,25 @@ def evaluate_plate_reliability(
     correction_cost: float,
     config: RecognitionConfig,
 ) -> tuple[float, list[str], bool]:
-    """Tính toán Reliability Score (0.0 -> 1.0) và xác định danh sách các lý do cần kiểm duyệt thủ công."""
-    score = (
-        0.40 * detection_confidence
-        + 0.35 * ocr_confidence
-        + 0.15 * ocr_consensus_ratio
-        + (0.10 if format_valid else 0.0)
-        - 0.05 * correction_cost
+    """API tương thích cũ; policy canonical không dùng điểm này làm gate."""
+    policy = decide_plate(
+        # API cũ không truyền raw text; giả định candidate đã có text để
+        # phân biệt FORMAT_INVALID (REVIEW) với UNREADABLE (REJECT).
+        raw_text="PLATE",
+        detection_confidence=detection_confidence,
+        ocr_confidence=ocr_confidence,
+        consensus_ratio=ocr_consensus_ratio,
+        format_valid=format_valid,
+        correction_suggestion="suggestion" if correction_cost > 0 else None,
+        config=config,
     )
-    reliability_score = float(np.clip(score, 0.0, 1.0))
-
-    review_reasons: list[str] = []
-    if detection_confidence < config.detection_confidence:
-        review_reasons.append("LOW_DETECTION_SCORE")
-    if ocr_confidence < config.ocr_minimum_confidence + 0.10:
-        review_reasons.append("LOW_OCR_SCORE")
-    if not format_valid:
-        review_reasons.append("INVALID_FORMAT")
-    if correction_cost > config.max_correction_cost:
-        review_reasons.append("HIGH_CORRECTION_COST")
-    if ocr_consensus_ratio < config.ocr_consensus_threshold:
-        review_reasons.append("VARIANT_DISAGREEMENT")
-    if reliability_score < config.min_reliability_score:
-        review_reasons.append("LOW_RELIABILITY_SCORE")
-
-    needs_manual_review = bool(review_reasons)
-    return reliability_score, review_reasons, needs_manual_review
+    reasons = list(policy["review_reasons"])
+    if "FORMAT_INVALID" in reasons and "INVALID_FORMAT" not in reasons:
+        # Alias để artifact/test cũ vẫn đọc được; read_plate canonical chỉ trả tên mới.
+        reasons.append("INVALID_FORMAT")
+    if correction_cost > config.max_correction_cost and "HIGH_CORRECTION_COST" not in reasons:
+        reasons.append("HIGH_CORRECTION_COST")
+    return policy["reliability_score"], reasons, bool(reasons)
 
 
 def read_plate(
@@ -334,101 +327,70 @@ def read_plate(
     config: RecognitionConfig | None = None,
     detection_confidence: float = 1.0,
 ) -> dict[str, Any]:
-    """Thực hiện quy trình đọc biển số hoàn chỉnh: Nắn góc, tiền xử lý đa biến thể, OCR, consensus và Reliability Policy."""
+    """OCR cascade thích ứng: fast path trước, rectification chỉ khi evidence chưa đủ."""
     if layout != "auto" and layout not in VALID_LAYOUTS:
         raise ValueError(f"Bố cục không hợp lệ: {layout}")
+    if crop_bgr is None or crop_bgr.size == 0:
+        raise ValueError("Crop biển số bị rỗng.")
     cfg = config or RecognitionConfig()
 
-    if cfg.enable_rectification:
-        target_crop, rectified = rectify_plate(crop_bgr)
-    else:
-        target_crop, rectified = crop_bgr, False
-
-    resolved_layout = layout if layout in VALID_LAYOUTS else infer_plate_layout(target_crop, cfg.wide_ratio_threshold)
-
-    # Phân định biến thể ảnh sẽ nạp vào EasyOCR dựa theo cấu hình ablation
-    if cfg.single_variant_mode == "crop":
-        variants = {"crop": target_crop}
-    elif cfg.single_variant_mode == "gray":
-        all_vars = preprocess_plate_variants(target_crop)
-        variants = {"gray": all_vars.get("gray", target_crop)}
-    elif cfg.single_variant_mode and cfg.single_variant_mode in {"clahe", "otsu", "adaptive"}:
-        all_vars = preprocess_plate_variants(target_crop)
-        variants = {cfg.single_variant_mode: all_vars.get(cfg.single_variant_mode, target_crop)}
+    if cfg.single_variant_mode:
+        variant_names = (cfg.single_variant_mode,)
+        candidates = [
+            _run_ocr_variant(reader, image, name, cfg, False, layout)
+            for name, image in _variant_images(crop_bgr, variant_names).items()
+        ]
     elif not cfg.enable_preprocessing_variants:
-        variants = {"crop": target_crop}
+        candidates = [_run_ocr_variant(reader, crop_bgr, "crop", cfg, False, layout)]
     else:
-        variants = preprocess_plate_variants(target_crop)
+        # Fast path đúng theo policy: chỉ Gray + CLAHE.
+        fast = _variant_images(crop_bgr, ("gray", "clahe"))
+        candidates = [
+            _run_ocr_variant(reader, image, name, cfg, False, layout) for name, image in fast.items()
+        ]
 
-    candidates = []
-    for variant_name, processed in variants.items():
-        results = reader.readtext(
-            processed, detail=1, paragraph=False,
-            allowlist=OCR_ALLOWLIST,
-        )
-        raw_text, confidence, tokens = order_ocr_tokens(
-            results, resolved_layout, minimum_confidence=cfg.ocr_minimum_confidence
-        )
-        validated = validate_and_correct_plate(
-            raw_text,
-            enable_correction=cfg.enable_template_correction,
-            max_cost=cfg.max_correction_cost,
-        )
-        score = (
-            confidence
-            + (cfg.valid_format_bonus if validated["format_valid"] else 0.0)
-            - cfg.correction_penalty * validated["correction_cost"]
-        )
-        candidates.append({
-            **validated,
-            "ocr_confidence": confidence,
-            "layout": resolved_layout,
-            "rectified": rectified,
-            "variant": variant_name,
-            "score": score,
-            "tokens": tokens,
-        })
+        if not _has_enough_evidence(candidates, cfg):
+            target_crop, rectified = crop_bgr, False
+            if cfg.enable_rectification:
+                target_crop, rectified = rectify_plate(crop_bgr)
+            fallback = _variant_images(target_crop, ("gray", "otsu", "adaptive"))
+            candidates.extend(
+                _run_ocr_variant(reader, image, name, cfg, rectified, layout)
+                for name, image in fallback.items()
+                if name != "gray" or rectified
+            )
 
-    if not candidates:
-        reliability_score, review_reasons, needs_review = evaluate_plate_reliability(
-            detection_confidence, 0.0, 0.0, False, 0.0, cfg
-        )
-        return {
-            "raw_text": "", "text": "", "format_valid": False, "template": None,
-            "correction_cost": 0.0, "correction_applied": False,
-            "ocr_confidence": 0.0, "ocr_consensus_ratio": 0.0, "reliability_score": reliability_score,
-            "layout": resolved_layout, "variant": None, "score": 0.0, "rectified": rectified,
-            "needs_manual_review": needs_review, "review_reasons": review_reasons,
-        }
-
-    best = max(candidates, key=lambda item: item["score"])
-    top_text = best["text"]
-    matching_count = sum(1 for c in candidates if c["text"] == top_text)
-    ocr_consensus_ratio = float(matching_count / len(candidates))
-
-    reliability_score, review_reasons, needs_review = evaluate_plate_reliability(
-        detection_confidence,
-        best["ocr_confidence"],
-        ocr_consensus_ratio,
-        best["format_valid"],
-        best["correction_cost"],
-        cfg,
+    selected, consensus = _select_by_consensus(candidates)
+    grammar = validate_and_correct_plate(
+        selected.get("raw_text", ""),
+        enable_correction=cfg.enable_template_correction,
+        max_cost=cfg.max_correction_cost,
     )
-
+    policy = decide_plate(
+        raw_text=grammar["raw_text"],
+        detection_confidence=detection_confidence,
+        ocr_confidence=float(selected.get("ocr_confidence", 0.0)),
+        consensus_ratio=consensus,
+        format_valid=grammar["format_valid"],
+        correction_suggestion=grammar["correction_suggestion"],
+        config=cfg,
+    )
+    decision = policy["decision"]
     return {
-        "raw_text": best["raw_text"],
-        "text": best["text"],
-        "format_valid": best["format_valid"],
-        "template": best["template"],
-        "correction_cost": best["correction_cost"],
-        "correction_applied": best["correction_applied"],
-        "ocr_confidence": best["ocr_confidence"],
-        "ocr_consensus_ratio": ocr_consensus_ratio,
-        "reliability_score": reliability_score,
-        "layout": best["layout"],
-        "variant": best["variant"],
-        "score": best["score"],
-        "rectified": best["rectified"],
-        "needs_manual_review": needs_review,
-        "review_reasons": review_reasons,
+        **grammar,
+        "accepted_text": grammar["raw_text"] if decision == "ACCEPT" else None,
+        "ocr_confidence": float(selected.get("ocr_confidence", 0.0)),
+        "ocr_consensus_ratio": float(consensus),
+        "consensus": float(consensus),
+        "reliability_score": policy["reliability_score"],
+        "evidence": policy["evidence"],
+        "policy_version": policy["policy_version"],
+        "decision": decision,
+        "needs_manual_review": policy["needs_manual_review"],
+        "review_reasons": policy["review_reasons"],
+        "layout": selected.get("layout", layout if layout != "auto" else "1_line"),
+        "variant": selected.get("variant"),
+        "score": float(selected.get("ocr_confidence", 0.0)),
+        "rectified": bool(selected.get("rectified", False)),
+        "tokens": selected.get("tokens", []),
     }

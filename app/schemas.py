@@ -15,11 +15,16 @@ class RecognitionData(BaseModel):
     """Thông tin nhận dạng chuỗi ký tự và chuẩn hóa mẫu (Model Layer - Recognition)."""
 
     raw_text: str = Field(description="Chuỗi ký tự nhận dạng thô từ OCR")
-    text: str = Field(description="Chuỗi ký tự biển số đã qua hiệu chỉnh khớp mẫu")
-    format_valid: bool = Field(description="Cờ báo chuỗi có khớp mẫu định dạng biển số xe Việt Nam hay không")
+    normalized_text: str = Field(description="Chuỗi raw_text sau chuẩn hóa ASCII, không sửa theo grammar")
+    text: str = Field(description="Alias tương thích ngược của normalized_text")
+    format_valid: bool = Field(description="Chuỗi raw_text có khớp mẫu được hỗ trợ hay không")
     template: str | None = Field(default=None, description="Mẫu định dạng đã khớp (ví dụ: 'DDLDDDDD')")
     correction_cost: float = Field(ge=0, description="Chi phí hiệu chỉnh ký tự")
-    correction_applied: bool = Field(default=False, description="Cờ báo chuỗi đã qua tự động hiệu chỉnh ký tự")
+    correction_suggestion: str | None = Field(default=None, description="Đề xuất sửa để operator kiểm tra")
+    plate_pattern_version: str = Field(default="civilian-v1", description="Phiên bản grammar đang dùng")
+    correction_applied: bool = Field(
+        default=False, description="Luôn false ở policy v1: không tự động ghi đè raw OCR"
+    )
 
 
 class ScoreData(BaseModel):
@@ -27,22 +32,30 @@ class ScoreData(BaseModel):
 
     detector_confidence: float = Field(ge=0, le=1, description="Độ tin cậy phát hiện của YOLOv8")
     ocr_confidence: float = Field(ge=0, le=1, description="Độ tin cậy nhận dạng trung bình của OCR")
-    ocr_consensus_ratio: float = Field(ge=0, le=1, default=1.0, description="Tỷ lệ đồng thuận giữa các biến thể ảnh OCR")
-    reliability_score: float = Field(ge=0, le=1, default=1.0, description="Điểm tin cậy tổng hợp toàn hệ thống (0.0 -> 1.0)")
+    ocr_consensus_ratio: float = Field(
+        ge=0, le=1, default=1.0, description="Tỷ lệ đồng thuận giữa các biến thể ảnh OCR"
+    )
+    reliability_score: float = Field(
+        ge=0, le=1, default=1.0, description="Điểm diagnostic, không phải xác suất và không làm gate"
+    )
 
 
 class ReviewData(BaseModel):
     """Chính sách kiểm duyệt thủ công (Decision Layer - Human-in-the-loop Policy)."""
 
     required: bool = Field(default=False, description="Cờ báo kết quả cần được kiểm duyệt thủ công")
-    reasons: list[str] = Field(default_factory=list, description="Danh sách lý do kích hoạt kiểm duyệt thủ công")
+    reasons: list[str] = Field(
+        default_factory=list, description="Danh sách lý do kích hoạt kiểm duyệt thủ công"
+    )
 
 
 class LatencyData(BaseModel):
     """Thống kê chi tiết độ trễ từng công đoạn (Stage Latency Profiling)."""
 
     image_pipeline_latency_ms: float = Field(ge=0, description="Tổng thời gian xử lý toàn bộ ảnh (ms)")
-    plate_ocr_latency_ms: float = Field(ge=0, default=0.0, description="Thời gian thực thi OCR trên riêng vùng biển số này (ms)")
+    plate_ocr_latency_ms: float = Field(
+        ge=0, default=0.0, description="Thời gian thực thi OCR trên riêng vùng biển số này (ms)"
+    )
     detector_latency_ms: float = Field(ge=0, default=0.0, description="Thời gian thực thi YOLO Detector (ms)")
 
 
@@ -63,16 +76,29 @@ class PlatePrediction(BaseModel):
     # Thuộc tính phẳng giữ tính tương thích ngược (Backward Compatibility)
     detection_confidence: float = Field(ge=0, le=1, description="Độ tin cậy phát hiện của YOLOv8")
     raw_text: str = Field(description="Chuỗi ký tự nhận dạng thô từ OCR")
-    text: str = Field(description="Chuỗi ký tự biển số đã qua hậu xử lý hiệu chỉnh")
-    format_valid: bool = Field(description="Cờ báo chuỗi có khớp mẫu định dạng biển số Việt Nam hay không")
+    normalized_text: str = Field(description="Chuỗi raw_text sau chuẩn hóa ASCII")
+    text: str = Field(description="Alias tương thích ngược của normalized_text")
+    accepted_text: str | None = Field(
+        default=None, description="Chuỗi chỉ được chấp nhận khi decision=ACCEPT"
+    )
+    format_valid: bool = Field(description="Chuỗi raw_text có khớp mẫu được hỗ trợ hay không")
     template: str | None = Field(default=None, description="Mẫu định dạng đã khớp (ví dụ: 'DDLDDDDD')")
     correction_cost: float = Field(ge=0, description="Chi phí sửa lỗi ký tự")
-    correction_applied: bool = Field(default=False, description="Cờ báo kết quả đã qua tự động hiệu chỉnh ký tự")
+    correction_suggestion: str | None = Field(default=None, description="Đề xuất sửa, không tự động áp dụng")
+    correction_applied: bool = Field(
+        default=False, description="Cờ báo kết quả đã qua tự động hiệu chỉnh ký tự"
+    )
     needs_manual_review: bool = Field(default=False, description="Cờ báo kết quả cần được kiểm tra thủ công")
     ocr_confidence: float = Field(ge=0, le=1, description="Độ tin cậy nhận dạng trung bình của EasyOCR")
-    ocr_consensus_ratio: float = Field(ge=0, le=1, default=1.0, description="Tỷ lệ đồng thuận giữa các biến thể OCR")
-    reliability_score: float = Field(ge=0, le=1, default=1.0, description="Điểm tin cậy tổng hợp toàn hệ thống")
+    ocr_consensus_ratio: float = Field(
+        ge=0, le=1, default=1.0, description="Tỷ lệ đồng thuận giữa các biến thể OCR"
+    )
+    reliability_score: float = Field(
+        ge=0, le=1, default=1.0, description="Điểm tin cậy tổng hợp toàn hệ thống"
+    )
     review_reasons: list[str] = Field(default_factory=list, description="Các lý do cần kiểm duyệt thủ công")
+    decision: str = Field(description="Quyết định vận hành: ACCEPT, REVIEW hoặc REJECT")
+    policy_version: str = Field(default="1.0.0", description="Phiên bản decision policy")
     layout: str = Field(description="Bố cục biển số suy luận ('1_line' hoặc '2_line')")
     rectified: bool = Field(description="Cờ báo ảnh crop đã được nắn góc phối cảnh thành công hay chưa")
     variant: str | None = Field(default=None, description="Tên biến thể tiền xử lý ảnh đạt điểm cao nhất")
@@ -83,6 +109,7 @@ class PlatePrediction(BaseModel):
 class PredictionResponse(BaseModel):
     """Phản hồi JSON đầy đủ cho yêu cầu nhận diện ảnh."""
 
+    model_version: str = Field(default="unknown", description="Phiên bản detector + OCR policy đang chạy")
     filename: str | None = Field(default=None, description="Tên tệp ảnh đã tải lên")
     latency_ms: float = Field(ge=0, description="Tổng thời gian xử lý ảnh (ms)")
     predictions: list[PlatePrediction] = Field(description="Danh sách các biển số nhận dạng được")
@@ -103,7 +130,7 @@ class LivenessResponse(BaseModel):
 
 
 class ReadinessResponse(BaseModel):
-    """Trạng thái readiness (kiểm tra mô hình đã nạp và sẵn sàng nhận request)."""
+    """Trạng thái readiness dựa trên việc tệp trọng số đã sẵn sàng."""
 
     status: str = Field(description="Trạng thái sẵn sàng ('ready' hoặc 'not_ready')")
-    model_available: bool = Field(description="Cờ báo tệp trọng số sẵn sàng")
+    model_available: bool = Field(description="Cờ báo tệp trọng số tồn tại")

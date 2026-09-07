@@ -17,8 +17,15 @@ def main() -> None:
     """Đánh giá độ chính xác Precision, Recall, mAP50, mAP50-95 của mô hình phát hiện biển số."""
     parser = argparse.ArgumentParser(description="Đánh giá mô hình phát hiện biển số xe trên test split.")
     parser.add_argument("--weights", type=Path, required=True, help="Đường dẫn tới tệp trọng số best.pt")
-    parser.add_argument("--data", type=Path, default=Path("data.yaml"), help="Đường dẫn tệp cấu hình data.yaml")
-    parser.add_argument("--output", type=Path, default=Path("artifacts/detector_test_metrics.json"), help="Đường dẫn lưu kết quả JSON")
+    parser.add_argument(
+        "--data", type=Path, default=Path("data.yaml"), help="Đường dẫn tệp cấu hình data.yaml"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("artifacts/detector_test_metrics.json"),
+        help="Đường dẫn lưu kết quả JSON",
+    )
     args = parser.parse_args()
 
     logger.info("Đang thực hiện đánh giá detector trên tập kiểm thử test split...")
@@ -56,7 +63,13 @@ def main() -> None:
     }
     write_json(args.output, payload)
     logger.info("Kết quả đánh giá detector đã lưu tại: %s", args.output)
-    logger.info("mAP50: %.4f | mAP50-95: %.4f | Precision: %.4f | Recall: %.4f", payload["mAP50"], payload["mAP50_95"], payload["precision"], payload["recall"])
+    logger.info(
+        "mAP50: %.4f | mAP50-95: %.4f | Precision: %.4f | Recall: %.4f",
+        payload["mAP50"],
+        payload["mAP50_95"],
+        payload["precision"],
+        payload["recall"],
+    )
 
 
 if __name__ == "__main__":

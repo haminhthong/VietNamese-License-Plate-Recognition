@@ -16,12 +16,40 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Nhận diện biển số xe từ một tệp ảnh.")
     parser.add_argument("--weights", type=Path, required=True, help="Đường dẫn tới tệp trọng số YOLOv8 (.pt)")
     parser.add_argument("--source", type=Path, required=True, help="Đường dẫn tệp ảnh đầu vào")
-    parser.add_argument("--output", type=Path, default=Path("outputs/prediction.jpg"), help="Đường dẫn tệp ảnh kết quả minh họa")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("outputs/prediction.jpg"),
+        help="Đường dẫn tệp ảnh kết quả minh họa",
+    )
     parser.add_argument("--cpu", action="store_true", help="Ép buộc thực thi trên CPU")
-    parser.add_argument("--confidence", type=float, default=0.25, help="Ngưỡng độ tin cậy phát hiện biển số")
+    parser.add_argument(
+        "--candidate-confidence",
+        type=float,
+        default=0.10,
+        help="Ngưỡng thấp để giữ candidate detector cho decision policy",
+    )
+    parser.add_argument(
+        "--accept-confidence",
+        type=float,
+        default=0.50,
+        help="Ngưỡng detector tối thiểu để AUTO_ACCEPT",
+    )
+    parser.add_argument("--ocr-threshold", type=float, default=0.65, help="Ngưỡng OCR để AUTO_ACCEPT")
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        help="Alias legacy cho --candidate-confidence",
+    )
     args = parser.parse_args()
 
-    config = RecognitionConfig(detection_confidence=args.confidence)
+    config = RecognitionConfig(
+        detector_candidate_threshold=args.candidate_confidence
+        if args.confidence is None
+        else args.confidence,
+        auto_accept_detector_threshold=args.accept_confidence,
+        ocr_threshold=args.ocr_threshold,
+    )
     recognizer = LicensePlateRecognizer(
         args.weights,
         gpu=False if args.cpu else None,

@@ -20,6 +20,44 @@ from .ocr import read_plate
 Box = tuple[int, int, int, int]
 
 
+def _rejected_plate_result(
+    reason: str,
+    detector_confidence: float = 0.0,
+    rectified: bool = False,
+) -> dict[str, Any]:
+    """Tạo kết quả chuẩn cho candidate bị loại trước khi chạy OCR."""
+    return {
+        "raw_text": "",
+        "normalized_text": "",
+        "text": "",
+        "accepted_text": None,
+        "format_valid": False,
+        "template": None,
+        "correction_cost": 0.0,
+        "correction_suggestion": None,
+        "correction_applied": False,
+        "ocr_confidence": 0.0,
+        "ocr_consensus_ratio": 0.0,
+        "consensus": 0.0,
+        "reliability_score": 0.0,
+        "evidence": {
+            "detector_score": float(detector_confidence),
+            "ocr_score": 0.0,
+            "variant_consensus": 0.0,
+        },
+        "decision": "REJECT",
+        "policy_version": "1.0.0",
+        "plate_pattern_version": "civilian-v1",
+        "needs_manual_review": False,
+        "review_reasons": [reason],
+        "layout": "1_line",
+        "variant": None,
+        "score": 0.0,
+        "rectified": rectified,
+        "tokens": [],
+    }
+
+
 def crop_with_padding(image: np.ndarray, box: Box, padding_ratio: float = 0.05) -> tuple[np.ndarray, Box]:
     """Cắt vùng ảnh chứa biển số từ Bounding Box và mở rộng lề đệm nhưng đảm bảo không vượt quá biên ảnh.
 
@@ -51,6 +89,37 @@ def crop_with_padding(image: np.ndarray, box: Box, padding_ratio: float = 0.05) 
     )
     px1, py1, px2, py2 = padded
     return image[py1:py2, px1:px2], padded
+
+
+def validate_image_quality(image_bgr: np.ndarray, config: RecognitionConfig) -> dict[str, Any]:
+    """Đánh giá nhanh độ phân giải, độ nét và phơi sáng trước khi chạy detector."""
+    if image_bgr is None or image_bgr.size == 0:
+        return {"valid": False, "reasons": ["IMAGE_EMPTY"]}
+    height, width = image_bgr.shape[:2]
+    reasons: list[str] = []
+    if width < config.min_image_width or height < config.min_image_height:
+        reasons.append("IMAGE_TOO_SMALL")
+
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    if blur_score < config.blur_threshold:
+        reasons.append("IMAGE_TOO_BLURRY")
+
+    dark_ratio = float(np.mean(gray <= 8))
+    bright_ratio = float(np.mean(gray >= 247))
+    if dark_ratio >= 0.98:
+        reasons.append("IMAGE_UNDEREXPOSED")
+    if bright_ratio >= 0.98:
+        reasons.append("IMAGE_OVEREXPOSED")
+    return {
+        "valid": not reasons,
+        "reasons": reasons,
+        "width": width,
+        "height": height,
+        "blur_score": blur_score,
+        "dark_ratio": dark_ratio,
+        "bright_ratio": bright_ratio,
+    }
 
 
 class LicensePlateRecognizer:
@@ -90,7 +159,11 @@ class LicensePlateRecognizer:
         """
         if image_bgr is None or image_bgr.size == 0:
             raise ValueError("Ảnh đầu vào bị rỗng.")
-        detection_confidence = self.config.detection_confidence if confidence is None else confidence
+        quality = validate_image_quality(image_bgr, self.config)
+        if not quality["valid"]:
+            self.last_latency_ms = 0.0
+            raise ValueError(f"Ảnh không đạt quality gate: {', '.join(quality['reasons'])}")
+        detection_confidence = self.config.detector_candidate_threshold if confidence is None else confidence
         if not 0 <= detection_confidence <= 1:
             raise ValueError("Tham số 'confidence' phải nằm trong khoảng [0, 1].")
 
@@ -116,29 +189,50 @@ class LicensePlateRecognizer:
             class_id = int(box.cls.item())
             det_conf = float(box.conf.item())
 
-            plate_start = perf_counter()
-            ocr_res = read_plate(self.reader, crop, config=self.config, detection_confidence=det_conf)
-            plate_ocr_latency_ms = (perf_counter() - plate_start) * 1_000
+            # Crop quá nhỏ không đủ thông tin cho OCR; trả REJECT có lý do rõ ràng.
+            crop_height, crop_width = crop.shape[:2]
+            if crop_width < self.config.min_plate_width or crop_height < self.config.min_plate_height:
+                ocr_res = _rejected_plate_result(
+                    "PLATE_TOO_SMALL",
+                    detector_confidence=det_conf,
+                )
+                plate_ocr_latency_ms = 0.0
+            else:
+                plate_start = perf_counter()
+                ocr_res = read_plate(
+                    self.reader,
+                    crop,
+                    config=self.config,
+                    detection_confidence=det_conf,
+                )
+                plate_ocr_latency_ms = (perf_counter() - plate_start) * 1_000
 
-            predictions.append({
-                "box": detected_box,
-                "padded_box": padded_box,
-                "class_id": class_id,
-                "detector_class": result.names.get(class_id, "unknown"),
-                "detection_confidence": det_conf,
-                "detector_latency_ms": detector_latency_ms,
-                "plate_ocr_latency_ms": plate_ocr_latency_ms,
-                **ocr_res,
-            })
+            predictions.append(
+                {
+                    "box": detected_box,
+                    "padded_box": padded_box,
+                    "class_id": class_id,
+                    "detector_class": result.names.get(class_id, "unknown"),
+                    "detection_confidence": det_conf,
+                    "detector_latency_ms": detector_latency_ms,
+                    "plate_ocr_latency_ms": plate_ocr_latency_ms,
+                    **ocr_res,
+                }
+            )
 
         # Post-NMS deduplication: loại bỏ các bboxes trùng lặp có IoU cao và cùng kết quả text
         if len(predictions) > 1:
             from .metrics import box_iou
+
             filtered: list[dict[str, Any]] = []
             for p in sorted(predictions, key=lambda x: x["score"], reverse=True):
                 duplicate = False
                 for existing in filtered:
-                    if box_iou(p["box"], existing["box"]) > 0.70 and p["text"] == existing["text"] and p["text"] != "":
+                    if (
+                        box_iou(p["box"], existing["box"]) > 0.70
+                        and p["text"] == existing["text"]
+                        and p["text"] != ""
+                    ):
                         duplicate = True
                         break
                 if not duplicate:
@@ -190,8 +284,9 @@ def draw_predictions(image: np.ndarray, predictions: list[dict[str, Any]]) -> np
     for prediction in predictions:
         x1, y1, x2, y2 = prediction["box"]
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        text = prediction["text"] or "[không đọc được]"
-        label = f"{text} {prediction['detection_confidence']:.2f}"
+        text = prediction.get("accepted_text") or prediction.get("raw_text") or "[không đọc được]"
+        decision = prediction.get("decision", "REVIEW")
+        label = f"{text} [{decision}] {prediction['detection_confidence']:.2f}"
         cv2.putText(
             annotated,
             label,

@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from .ocr import normalize_plate_text
+from .grammar import normalize_plate_text
 
 
 def classify_error(
@@ -51,7 +51,7 @@ def generate_error_analysis_report(
             classify_error(
                 row["ground_truth"],
                 row["raw_prediction"],
-                row["corrected_prediction"],
+                row.get("accepted_prediction", row.get("corrected_prediction", "")),
                 row["detected"],
                 row.get("iou", 1.0),
             )

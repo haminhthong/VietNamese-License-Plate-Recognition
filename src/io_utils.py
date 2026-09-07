@@ -6,6 +6,7 @@ và ghi tệp JSON theo chuẩn mã hóa UTF-8.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,15 @@ from typing import Any
 import cv2
 import numpy as np
 import pandas as pd
+
+
+def sha256_file(path: str | Path) -> str:
+    """Tính SHA-256 theo stream để lưu lineage cho manifest/config/weights."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def require_columns(frame: pd.DataFrame, required: set[str], source_name: str) -> None:
@@ -46,6 +56,38 @@ def require_non_empty_text(frame: pd.DataFrame, column: str, source_name: str) -
     values = frame[column].fillna("").astype(str).str.strip()
     if values.eq("").any():
         raise ValueError(f"Cột '{column}' trong nguồn dữ liệu '{source_name}' không được để rỗng.")
+
+
+def require_manifest_split(
+    frame: pd.DataFrame,
+    expected_split: str,
+    source_name: str,
+    *,
+    allow_unlocked: bool = False,
+) -> None:
+    """Bắt buộc evaluator đọc đúng development hoặc locked-test manifest."""
+    if "split" not in frame.columns:
+        if allow_unlocked:
+            return
+        raise ValueError(
+            f"Nguồn dữ liệu '{source_name}' phải có cột split={expected_split}; "
+            "dùng cờ legacy chỉ khi chạy thử nghiệm cũ."
+        )
+    splits = frame["split"].fillna("").astype(str).str.strip().str.lower()
+    aliases = {
+        "valid": "dev",
+        "validation": "dev",
+        "development": "dev",
+        "locked_test": "test",
+        "final_test": "test",
+    }
+    normalized = splits.map(lambda value: aliases.get(value, value))
+    expected = aliases.get(expected_split.lower(), expected_split.lower())
+    if normalized.ne(expected).any():
+        found = sorted(normalized.unique())
+        raise ValueError(
+            f"Nguồn dữ liệu '{source_name}' chứa split {found}, cần toàn bộ là '{expected_split}'."
+        )
 
 
 def resolve_relative_path(path: str | Path, base_directory: Path) -> Path:

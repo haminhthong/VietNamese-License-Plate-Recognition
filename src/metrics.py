@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from .ocr import normalize_plate_text
+from .grammar import normalize_plate_text
 
 
 def levenshtein_distance(source: str, target: str) -> int:
@@ -29,11 +29,13 @@ def levenshtein_distance(source: str, target: str) -> int:
     for source_index, source_character in enumerate(source, 1):
         current = [source_index]
         for target_index, target_character in enumerate(target, 1):
-            current.append(min(
-                current[target_index - 1] + 1,
-                previous[target_index] + 1,
-                previous[target_index - 1] + (source_character != target_character),
-            ))
+            current.append(
+                min(
+                    current[target_index - 1] + 1,
+                    previous[target_index] + 1,
+                    previous[target_index - 1] + (source_character != target_character),
+                )
+            )
         previous = current
     return previous[-1]
 
@@ -73,7 +75,9 @@ def summarize_ocr(pairs: Iterable[tuple[str, str]]) -> dict[str, Any]:
     Raises:
         ValueError: Nếu tập mẫu rỗng hoặc chuỗi nhãn thực tế bị rỗng.
     """
-    normalized = [(normalize_plate_text(truth), normalize_plate_text(prediction)) for truth, prediction in pairs]
+    normalized = [
+        (normalize_plate_text(truth), normalize_plate_text(prediction)) for truth, prediction in pairs
+    ]
     if not normalized:
         raise ValueError("Không có mẫu dữ liệu OCR nào để đánh giá.")
     total_characters = sum(len(truth) for truth, _ in normalized)
@@ -136,12 +140,14 @@ def match_ground_truth_boxes(
         prediction = predictions[prediction_index] if matched else {"raw_text": "", "text": ""}
         if matched:
             unused.remove(prediction_index)
-        matched_results.append({
-            "truth": truth,
-            "prediction": prediction,
-            "matched": matched,
-            "iou": best_iou,
-        })
+        matched_results.append(
+            {
+                "truth": truth,
+                "prediction": prediction,
+                "matched": matched,
+                "iou": best_iou,
+            }
+        )
     return matched_results
 
 
@@ -159,7 +165,7 @@ def compute_confusion_matrix(pairs: Iterable[tuple[str, str]]) -> dict[str, int]
 
 
 def compute_postprocessing_gain_harm(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Tính các chỉ số đánh giá hiệu quả hậu xử lý Template: Correction Gain, Harm Rate, Precision, Recall."""
+    """Đo gain/harm của suggestion; suggestion không được coi là output đã apply."""
     gain_count = 0
     harm_count = 0
     raw_correct = 0
@@ -169,7 +175,12 @@ def compute_postprocessing_gain_harm(records: list[dict[str, Any]]) -> dict[str,
     for r in records:
         gt = normalize_plate_text(r.get("ground_truth", ""))
         raw = normalize_plate_text(r.get("raw_prediction", ""))
-        corr = normalize_plate_text(r.get("corrected_prediction", r.get("prediction", "")))
+        suggested_value = r.get("correction_suggestion")
+        corr = normalize_plate_text(
+            suggested_value
+            if suggested_value not in (None, "")
+            else r.get("corrected_prediction", r.get("prediction", r.get("raw_prediction", "")))
+        )
 
         is_raw_match = raw == gt
         is_corr_match = corr == gt
@@ -198,6 +209,33 @@ def compute_postprocessing_gain_harm(records: list[dict[str, Any]]) -> dict[str,
         "correction_recall": gain_count / max(1, raw_errors),
         "raw_exact_accuracy": raw_correct / total_samples,
         "corrected_exact_accuracy": corrected_correct / total_samples,
+        "suggestion_gain_count": gain_count,
+        "suggestion_harm_count": harm_count,
+        "suggestion_precision": gain_count / max(1, total_corrections),
+    }
+
+
+def compute_decision_metrics(records: Iterable[dict[str, Any]]) -> dict[str, float | int]:
+    """Tính Auto-Accept Precision, Coverage, Review Rate và Wrong Auto-Accept Rate."""
+    rows = list(records)
+    detected = [row for row in rows if row.get("detected", True)]
+    accepted = [row for row in detected if row.get("decision") == "ACCEPT"]
+    correct_accepted = [
+        row
+        for row in accepted
+        if normalize_plate_text(row.get("ground_truth", ""))
+        == normalize_plate_text(row.get("accepted_prediction", row.get("raw_prediction", "")))
+    ]
+    reviewed = [row for row in detected if row.get("decision") == "REVIEW"]
+    wrong_accepted = len(accepted) - len(correct_accepted)
+    return {
+        "detected_plates": len(detected),
+        "auto_accepted_plates": len(accepted),
+        "auto_accept_exact_precision": len(correct_accepted) / max(1, len(accepted)),
+        "auto_accept_coverage": len(accepted) / max(1, len(detected)),
+        "review_rate": len(reviewed) / max(1, len(detected)),
+        "wrong_auto_accept_count": wrong_accepted,
+        "wrong_auto_accept_rate": wrong_accepted / max(1, len(accepted)),
     }
 
 
@@ -217,10 +255,10 @@ def compute_positional_accuracy(pairs: Iterable[tuple[str, str]]) -> dict[str, f
 
             # Chữ cái series (vị trí 2)
             letter_total += 1
-            letter_correct += (gt[2] == pr[2])
+            letter_correct += gt[2] == pr[2]
 
             # Các chữ số thứ tự đuôi (từ vị trí 3 trở đi)
-            serial_total += (len(gt) - 3)
+            serial_total += len(gt) - 3
             serial_correct += sum(gt[i] == pr[i] for i in range(3, len(gt)))
 
     return {
@@ -234,29 +272,48 @@ def bootstrap_confidence_intervals(
     pairs: list[tuple[str, str]],
     num_bootstraps: int = 500,
     ci: float = 0.95,
+    groups: list[str] | None = None,
 ) -> dict[str, list[float]]:
-    """Tính khoảng tin cậy 95% Bootstrap cho Exact Plate Accuracy và CER."""
+    """Tính bootstrap CI, có thể resample theo plate identity/capture group.
+
+    Khi ``groups`` được cung cấp, toàn bộ dòng cùng group được lấy cùng nhau để
+    các frame liên tiếp của một xe không bị coi là các quan sát độc lập.
+    """
     import numpy as np
 
     if not pairs:
         return {"exact_accuracy_ci95": [0.0, 0.0], "cer_ci95": [0.0, 0.0]}
+    if num_bootstraps <= 0:
+        raise ValueError("num_bootstraps phải lớn hơn 0.")
+    if not 0 < ci < 1:
+        raise ValueError("ci phải nằm trong khoảng (0, 1).")
+    if groups is not None and len(groups) != len(pairs):
+        raise ValueError("groups phải có cùng số phần tử với pairs.")
 
     rng = np.random.default_rng(42)
-    sample_size = len(pairs)
     acc_bootstraps = []
     cer_bootstraps = []
 
     pairs_arr = np.array(pairs, dtype=object)
+    group_values = np.array(groups if groups is not None else list(range(len(pairs))), dtype=object)
+    unique_groups = np.unique(group_values)
     for _ in range(num_bootstraps):
-        indices = rng.choice(sample_size, size=sample_size, replace=True)
+        sampled_groups = rng.choice(unique_groups, size=len(unique_groups), replace=True)
+        indices = np.concatenate([np.flatnonzero(group_values == group) for group in sampled_groups])
         boot_pairs = pairs_arr[indices]
         summary = summarize_ocr([(p[0], p[1]) for p in boot_pairs])
         acc_bootstraps.append(summary["exact_plate_accuracy"])
         cer_bootstraps.append(summary["cer"])
 
     alpha = (1.0 - ci) / 2.0
-    acc_ci = [float(np.percentile(acc_bootstraps, alpha * 100)), float(np.percentile(acc_bootstraps, (1 - alpha) * 100))]
-    cer_ci = [float(np.percentile(cer_bootstraps, alpha * 100)), float(np.percentile(cer_bootstraps, (1 - alpha) * 100))]
+    acc_ci = [
+        float(np.percentile(acc_bootstraps, alpha * 100)),
+        float(np.percentile(acc_bootstraps, (1 - alpha) * 100)),
+    ]
+    cer_ci = [
+        float(np.percentile(cer_bootstraps, alpha * 100)),
+        float(np.percentile(cer_bootstraps, (1 - alpha) * 100)),
+    ]
 
     return {
         "exact_accuracy_ci95": acc_ci,

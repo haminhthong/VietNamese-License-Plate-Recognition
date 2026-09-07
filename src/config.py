@@ -125,29 +125,37 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class RecognitionConfig:
-    """Các thông số cấu hình thống nhất cho phát hiện, nắn góc, OCR và hậu xử lý.
+    """Cấu hình thống nhất cho detector, OCR cascade và decision policy.
 
     Attributes:
-        detection_confidence (float): Ngưỡng độ tin cậy tối thiểu của YOLOv8 (mặc định: 0.25).
+        detector_candidate_threshold (float): Ngưỡng thấp để giữ candidate (mặc định: 0.10).
+        auto_accept_detector_threshold (float): Ngưỡng detector cho AUTO_ACCEPT (mặc định: 0.50).
         nms_iou (float): Ngưỡng NMS IoU loại bỏ bounding box trùng lặp (mặc định: 0.60).
         image_size (int): Kích thước ảnh resize đầu vào mô hình YOLO (mặc định: 640).
         padding_ratio (float): Tỷ lệ đệm mở rộng lề khi cắt biển số (mặc định: 0.05 tức 5%).
         ocr_minimum_confidence (float): Độ tin cậy OCR tối thiểu cho từng token (mặc định: 0.20).
         wide_ratio_threshold (float): Ngưỡng tỷ lệ aspect ratio để phân biệt biển 1 dòng / 2 dòng (mặc định: 2.20).
-        valid_format_bonus (float): Điểm cộng khi kết quả OCR khớp mẫu biển số Việt Nam (mặc định: 0.20).
-        correction_penalty (float): Điểm phạt cho mỗi ký tự phải hiệu chỉnh (mặc định: 0.07).
-        max_correction_cost (float): Giới hạn chi phí hiệu chỉnh tối đa (mặc định: 1.0).
-        enable_rectification (bool): Bật nắn góc phối cảnh (mặc định: True).
-        enable_preprocessing_variants (bool): Bật 4 biến thể xử lý ảnh (Gray, CLAHE, Otsu, Adaptive) (mặc định: True).
-        enable_template_correction (bool): Bật hậu xử lý khớp mẫu (mặc định: True).
+        valid_format_bonus/correction_penalty/min_reliability_score: Trường diagnostic legacy, không làm gate.
+        max_correction_cost: Chi phí diagnostic legacy; mọi suggestion vẫn cần REVIEW ở v1.
+        ocr_threshold (float): Ngưỡng OCR cho AUTO_ACCEPT (mặc định: 0.65).
+        ocr_consensus_threshold (float): Ngưỡng đồng thuận giữa các biến thể (mặc định: 0.50).
+        enable_rectification (bool): Bật fallback nắn góc phối cảnh (mặc định: True).
+        enable_preprocessing_variants (bool): Bật adaptive OCR cascade (mặc định: True).
+        enable_template_correction (bool): Bật tạo correction suggestion (mặc định: True).
         single_variant_mode (str | None): Tùy chọn chỉ chạy một biến thể (crop/gray/clahe/otsu/adaptive).
     """
 
-    detection_confidence: float = 0.25
+    # Ngưỡng thấp để giữ candidate cho decision layer đánh giá.
+    detector_candidate_threshold: float = 0.10
+    # Ngưỡng cao hơn dùng cho quyết định AUTO_ACCEPT.
+    auto_accept_detector_threshold: float = 0.50
+    # Alias của cấu hình cũ; nếu có giá trị thì ghi đè candidate threshold.
+    detection_confidence: float | None = None
     nms_iou: float = 0.60
     image_size: int = 640
     padding_ratio: float = 0.05
     ocr_minimum_confidence: float = 0.20
+    ocr_threshold: float = 0.65
     wide_ratio_threshold: float = 2.20
     valid_format_bonus: float = 0.20
     correction_penalty: float = 0.07
@@ -157,13 +165,67 @@ class RecognitionConfig:
     enable_template_correction: bool = True
     single_variant_mode: str | None = None
 
+    min_plate_width: int = 20
+    min_plate_height: int = 8
+    min_image_width: int = 160
+    min_image_height: int = 120
+    blur_threshold: float = 5.0
+
     min_reliability_score: float = 0.70
     ocr_consensus_threshold: float = 0.50
 
     def __post_init__(self) -> None:
         """Kiểm tra tính hợp lệ của các giá trị tham số cấu hình."""
-        if not 0 <= self.detection_confidence <= 1:
-            raise ValueError("Tham số 'detection_confidence' phải nằm trong khoảng [0, 1].")
+        integer_fields = (
+            "image_size",
+            "min_plate_width",
+            "min_plate_height",
+            "min_image_width",
+            "min_image_height",
+        )
+        for field_name in integer_fields:
+            value = getattr(self, field_name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"Tham số '{field_name}' phải là số nguyên.")
+        numeric_fields = (
+            "detector_candidate_threshold",
+            "auto_accept_detector_threshold",
+            "nms_iou",
+            "padding_ratio",
+            "ocr_minimum_confidence",
+            "ocr_threshold",
+            "wide_ratio_threshold",
+            "valid_format_bonus",
+            "correction_penalty",
+            "max_correction_cost",
+            "min_reliability_score",
+            "ocr_consensus_threshold",
+            "blur_threshold",
+        )
+        for field_name in numeric_fields:
+            value = getattr(self, field_name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise TypeError(f"Tham số '{field_name}' phải là số.")
+        for field_name in (
+            "detector_candidate_threshold",
+            "auto_accept_detector_threshold",
+            "ocr_minimum_confidence",
+            "ocr_threshold",
+        ):
+            value = getattr(self, field_name)
+            if not 0 <= value <= 1:
+                raise ValueError(f"Tham số '{field_name}' phải nằm trong khoảng [0, 1].")
+        if self.detection_confidence is not None:
+            if not isinstance(self.detection_confidence, (int, float)) or isinstance(
+                self.detection_confidence, bool
+            ):
+                raise TypeError("Tham số 'detection_confidence' phải là số.")
+            if not 0 <= self.detection_confidence <= 1:
+                raise ValueError("Tham số 'detection_confidence' phải nằm trong khoảng [0, 1].")
+            # Tương thích CLI cũ: ngưỡng duy nhất được coi là candidate threshold.
+            object.__setattr__(self, "detector_candidate_threshold", self.detection_confidence)
+        if self.detector_candidate_threshold > self.auto_accept_detector_threshold:
+            raise ValueError("Ngưỡng candidate detector phải <= ngưỡng auto-accept.")
         if not 0 <= self.nms_iou <= 1:
             raise ValueError("Tham số 'nms_iou' phải nằm trong khoảng [0, 1].")
         if self.image_size <= 0:
@@ -174,6 +236,12 @@ class RecognitionConfig:
             raise ValueError("Tham số 'ocr_minimum_confidence' phải nằm trong khoảng [0, 1].")
         if self.wide_ratio_threshold <= 0:
             raise ValueError("Tham số 'wide_ratio_threshold' phải lớn hơn 0.")
+        if self.min_plate_width <= 0 or self.min_plate_height <= 0:
+            raise ValueError("Kích thước biển số tối thiểu phải là số nguyên dương.")
+        if self.min_image_width <= 0 or self.min_image_height <= 0:
+            raise ValueError("Kích thước ảnh tối thiểu phải là số nguyên dương.")
+        if self.blur_threshold < 0:
+            raise ValueError("blur_threshold không được nhỏ hơn 0.")
         if self.valid_format_bonus < 0:
             raise ValueError("Tham số 'valid_format_bonus' không được nhỏ hơn 0.")
         if self.correction_penalty < 0:
@@ -200,6 +268,11 @@ class RecognitionConfig:
         payload: Any = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("Tệp cấu hình nhận diện phải có định dạng YAML dictionary/mapping.")
+        if "detection_confidence" in payload and "detector_candidate_threshold" in payload:
+            raise ValueError(
+                "Chỉ được khai báo một trong hai khóa 'detection_confidence' hoặc "
+                "'detector_candidate_threshold'."
+            )
 
         allowed = set(cls.__dataclass_fields__)
         if unknown := set(payload) - allowed:

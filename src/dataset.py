@@ -15,6 +15,7 @@ import re
 import shutil
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import yaml
@@ -24,6 +25,71 @@ from sklearn.model_selection import GroupShuffleSplit
 CLASS_NAMES = {0: "license_plate"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 TARGET_RATIOS = {"train": 0.70, "val": 0.15, "test": 0.15}
+METADATA_COLUMNS = {"image_name", "image_path", "image_id"}
+
+
+def normalize_plate_identity(value: Any) -> str:
+    """Chuẩn hóa identity để grouping không phụ thuộc dấu cách hay dấu phân cách."""
+    text = "" if value is None else str(value).strip()
+    if text.lower() in {"", "nan", "none"}:
+        return ""
+    return re.sub(r"[^A-Z0-9]", "", text.upper())
+
+
+def plate_identity_hash(value: Any) -> str:
+    """Tạo hash ổn định cho artifact công khai, không phát tán biển số thật."""
+    normalized = normalize_plate_identity(value)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16] if normalized else ""
+
+
+def _load_metadata(root: Path, metadata_path: Path | None) -> dict[str, dict[str, Any]]:
+    """Nạp metadata theo image key; tệp không bắt buộc để hỗ trợ dataset legacy."""
+    if metadata_path and not metadata_path.is_file():
+        raise FileNotFoundError(f"Không tìm thấy tệp metadata: {metadata_path}")
+    candidates = [metadata_path] if metadata_path else [root / "metadata.csv", root / "annotations.csv"]
+    existing = next((path for path in candidates if path and path.is_file()), None)
+    if existing is None:
+        return {}
+
+    metadata = pd.read_csv(existing, dtype=str).fillna("")
+    key_column = next(
+        (column for column in ("image_path", "image_name", "image_id") if column in metadata.columns),
+        None,
+    )
+    if key_column is None:
+        raise ValueError(f"Metadata phải có một trong các cột: {sorted(METADATA_COLUMNS)}")
+    lookup: dict[str, dict[str, Any]] = {}
+    for row in metadata.to_dict(orient="records"):
+        key = str(row[key_column]).replace("\\", "/").strip()
+        keys = {key, Path(key).name, Path(key).stem}
+        if key_column in {"image_path", "image_id"}:
+            try:
+                keys.add(str((root / key).resolve()).replace("\\", "/"))
+            except OSError:
+                pass
+        for item in keys:
+            if item in lookup and lookup[item] != row:
+                raise ValueError(f"Metadata có nhiều dòng cho cùng ảnh: {key}")
+            lookup[item] = row
+    return lookup
+
+
+def _metadata_for_image(metadata: dict[str, dict[str, Any]], image_path: Path, root: Path) -> dict[str, Any]:
+    """Tìm metadata bằng đường dẫn tương đối, tên tệp hoặc stem."""
+    relative = str(image_path.relative_to(root)).replace("\\", "/")
+    absolute = str(image_path.resolve()).replace("\\", "/")
+    for key in (relative, image_path.name, image_path.stem, absolute):
+        if key in metadata:
+            return metadata[key]
+    return {}
+
+
+def _first_metadata_value(row: dict[str, Any], *names: str) -> str:
+    for name in names:
+        value = str(row.get(name, "")).strip()
+        if value:
+            return value
+    return ""
 
 
 def infer_source_group(stem: str) -> str:
@@ -69,8 +135,11 @@ def phash_hamming_distance(hash1: str, hash2: str) -> int:
     """Tính khoảng cách Hamming giữa hai chuỗi pHash."""
     if not hash1 or not hash2 or len(hash1) != len(hash2):
         return 64
-    val1 = int(hash1, 16)
-    val2 = int(hash2, 16)
+    try:
+        val1 = int(hash1, 16)
+        val2 = int(hash2, 16)
+    except ValueError:
+        return 64
     return bin(val1 ^ val2).count("1")
 
 
@@ -127,8 +196,52 @@ def parse_label_file(label_path: Path) -> list[tuple[int, float, float, float, f
     return rows
 
 
-def collect_manifest(root: Path) -> pd.DataFrame:
-    """Thu thập toàn bộ thông tin ảnh, nhãn, mã băm MD5, pHash và nhóm nguồn từ thư mục dữ liệu YOLO.
+class _BKTree:
+    """BK-Tree tối giản cho tìm pHash trong bán kính Hamming."""
+
+    def __init__(self) -> None:
+        self.root: tuple[int, str, set[str], dict[int, _BKTree]] | None = None
+
+    def add(self, value: int, group_id: str) -> None:
+        if self.root is None:
+            self.root = (value, group_id, {group_id}, {})
+            return
+        node = self.root
+        while True:
+            distance = (node[0] ^ value).bit_count()
+            if distance == 0:
+                node[2].add(group_id)
+                return
+            child = node[3].get(distance)
+            if child is None:
+                node[3][distance] = _BKTree()
+                node[3][distance].root = (value, group_id, {group_id}, {})
+                return
+            if child.root is None:
+                child.root = (value, group_id, {group_id}, {})
+                return
+            node = child.root
+
+    def search(self, value: int, radius: int) -> set[str]:
+        """Trả các group có pHash cách ``value`` không quá ``radius``."""
+        found: set[str] = set()
+
+        def visit(node: tuple[int, str, set[str], dict[int, _BKTree]] | None) -> None:
+            if node is None:
+                return
+            distance = (node[0] ^ value).bit_count()
+            if distance <= radius:
+                found.update(node[2])
+            for edge, child in node[3].items():
+                if distance - radius <= edge <= distance + radius:
+                    visit(child.root)
+
+        visit(self.root)
+        return found
+
+
+def collect_manifest(root: Path, metadata_path: Path | None = None) -> pd.DataFrame:
+    """Thu thập manifest ảnh và metadata identity/capture cho Protocol B.
 
     Args:
         root (Path): Đường dẫn thư mục dữ liệu gốc chứa train/valid/test.
@@ -152,6 +265,7 @@ def collect_manifest(root: Path) -> pd.DataFrame:
     if missing_directories:
         raise FileNotFoundError(f"Thiếu thư mục dữ liệu bắt buộc: {missing_directories[0]}")
 
+    metadata = _load_metadata(root, metadata_path)
     records = []
     missing_labels: list[Path] = []
     unreadable_images: list[Path] = []
@@ -173,17 +287,46 @@ def collect_manifest(root: Path) -> pd.DataFrame:
                 continue
             labels = parse_label_file(label_path)
             counts = Counter(item[0] for item in labels)
-            records.append({
-                "original_split": original_split,
-                "image_path": str(image_path),
-                "label_path": str(label_path),
-                "image_name": image_path.name,
-                "group_id": infer_source_group(image_path.stem),
-                "n_objects": len(labels),
-                "class_0_count": counts.get(0, 0),
-                "md5": file_md5(image_path),
-                "phash": compute_phash(image_path),
-            })
+            metadata_row = _metadata_for_image(metadata, image_path, root)
+            capture_group = _first_metadata_value(
+                metadata_row,
+                "capture_session_id",
+                "capture_group",
+                "session_id",
+            ) or infer_source_group(image_path.stem)
+            plate_text = _first_metadata_value(metadata_row, "plate_text")
+            plate_identity = _first_metadata_value(metadata_row, "plate_identity") or plate_text
+            identity_hash = _first_metadata_value(metadata_row, "plate_identity_hash") or plate_identity_hash(
+                plate_identity
+            )
+            image_id = f"{original_split}/{image_path.name}"
+            try:
+                plate_count = int(metadata_row.get("plate_count", "") or len(labels))
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"plate_count không hợp lệ trong metadata của {image_path}") from error
+            records.append(
+                {
+                    "image_id": image_id,
+                    "original_split": original_split,
+                    "image_path": str(image_path),
+                    "label_path": str(label_path),
+                    "image_name": image_path.name,
+                    "capture_group": capture_group,
+                    "camera_id": _first_metadata_value(metadata_row, "camera_id"),
+                    "group_id": capture_group,
+                    "n_objects": len(labels),
+                    "class_0_count": counts.get(0, 0),
+                    "plate_count": max(0, plate_count),
+                    "plate_identity": plate_identity,
+                    "plate_identity_hash": identity_hash,
+                    "plate_text": plate_text,
+                    "plate_text_normalized": normalize_plate_identity(plate_text),
+                    "layout": _first_metadata_value(metadata_row, "layout"),
+                    "plate_annotation_id": f"{image_id}::plate-0",
+                    "md5": file_md5(image_path),
+                    "phash": compute_phash(image_path),
+                }
+            )
 
     if not records:
         raise RuntimeError(f"Không tìm thấy cặp ảnh/nhãn YOLO hợp lệ trong thư mục: {root}")
@@ -221,22 +364,41 @@ def _merge_groups_connected_by_hash(frame: pd.DataFrame) -> pd.DataFrame:
         for group_id in groups[1:]:
             union(first, group_id)
 
-    # Gộp theo pHash khoảng cách Hamming <= 4
-    phashes = frame[["group_id", "phash"]].drop_duplicates().to_dict(orient="records")
-    for index1 in range(len(phashes)):
-        for index2 in range(index1 + 1, len(phashes)):
-            h1, h2 = phashes[index1]["phash"], phashes[index2]["phash"]
-            if h1 and h2 and phash_hamming_distance(h1, h2) <= 4:
-                union(phashes[index1]["group_id"], phashes[index2]["group_id"])
+    # Gộp pHash bằng BK-Tree thay vì so sánh O(N²) toàn bộ cặp ảnh.
+    phash_tree = _BKTree()
+    phash_groups: dict[str, set[str]] = {}
+    for row in frame[["group_id", "phash"]].drop_duplicates().itertuples(index=False):
+        if not row.phash:
+            continue
+        try:
+            phash_value = int(row.phash, 16)
+        except ValueError:
+            continue
+        phash_tree.add(phash_value, row.group_id)
+        phash_groups.setdefault(row.phash, set()).add(row.group_id)
+    for phash, groups in phash_groups.items():
+        for group_id in phash_tree.search(int(phash, 16), radius=4):
+            for source_group in groups:
+                union(source_group, group_id)
 
-    # Protocol B: Gộp theo cùng plate_identity / plate_text nếu có
-    plate_col = "plate_identity" if "plate_identity" in frame.columns else ("plate_text" if "plate_text" in frame.columns else None)
-    if plate_col:
-        for groups in frame.groupby(plate_col)["group_id"].unique():
-            if len(groups) > 1:
-                first = groups[0]
-                for group_id in groups[1:]:
-                    union(first, group_id)
+    # Protocol B: mỗi identity, capture session và chuỗi identity ghép phải ở một split.
+    identity_columns = [
+        column
+        for column in ("plate_identity", "plate_identity_hash", "plate_text")
+        if column in frame.columns
+    ]
+    identity_to_groups: dict[str, set[str]] = {}
+    for row in frame[["group_id", *identity_columns]].to_dict(orient="records"):
+        for column in identity_columns:
+            values = re.split(r"[|;,]", str(row.get(column, "")))
+            for value in values:
+                identity = normalize_plate_identity(value)
+                if identity:
+                    identity_to_groups.setdefault(identity, set()).add(row["group_id"])
+    for groups in identity_to_groups.values():
+        first, *rest = sorted(groups)
+        for group_id in rest:
+            union(first, group_id)
 
     result = frame.copy()
     result["group_id"] = result["group_id"].map(find)
@@ -245,23 +407,41 @@ def _merge_groups_connected_by_hash(frame: pd.DataFrame) -> pd.DataFrame:
 
 def audit_manifest(frame: pd.DataFrame) -> dict:
     """Thống kê chi tiết số lượng ảnh, đối tượng, nhóm nguồn và kiểm tra rò rỉ dữ liệu."""
-    crossing_groups = frame.groupby("group_id")["original_split"].nunique()
-    crossing_hashes = frame.groupby("md5")["original_split"].nunique()
+    split_column = "split" if "split" in frame.columns else "original_split"
+    crossing_groups = frame.groupby("group_id")[split_column].nunique()
+    crossing_hashes = frame.groupby("md5")[split_column].nunique()
 
-    plate_col = "plate_identity" if "plate_identity" in frame.columns else ("plate_text" if "plate_text" in frame.columns else None)
-    crossing_plates = frame.groupby(plate_col)["original_split"].nunique() if plate_col else None
+    identity_columns = [
+        column
+        for column in ("plate_identity", "plate_identity_hash", "plate_text")
+        if column in frame.columns
+    ]
+    identity_pairs: dict[str, set[str]] = {}
+    for row in frame[[split_column, *identity_columns]].to_dict(orient="records"):
+        for column in identity_columns:
+            for value in re.split(r"[|;,]", str(row.get(column, ""))):
+                identity = normalize_plate_identity(value)
+                if identity:
+                    identity_pairs.setdefault(identity, set()).add(str(row[split_column]))
+    crossing_plates = sum(len(splits) > 1 for splits in identity_pairs.values())
 
-    # Tính số cặp near-duplicates
+    # Đếm near-duplicate bằng BK-Tree; audit không còn bị nghẽn bởi O(N²).
     near_dup_pairs = 0
     if "phash" in frame.columns:
-        phashes = frame["phash"].tolist()
-        for idx1 in range(len(phashes)):
-            for idx2 in range(idx1 + 1, len(phashes)):
-                if phashes[idx1] and phashes[idx2] and phash_hamming_distance(phashes[idx1], phashes[idx2]) <= 4:
-                    near_dup_pairs += 1
+        tree = _BKTree()
+        phashes = frame["phash"].dropna().astype(str).loc[lambda values: values != ""].unique()
+        for phash in phashes:
+            try:
+                phash_value = int(phash, 16)
+            except ValueError:
+                continue
+            neighbors = tree.search(phash_value, radius=4)
+            near_dup_pairs += len(neighbors)
+            tree.add(phash_value, phash)
 
     exact_duplicates = int(frame["md5"].duplicated().sum())
-    split_counts = frame.get("split", frame["original_split"]).value_counts().to_dict()
+    split_values = frame["split"] if "split" in frame.columns else frame["original_split"]
+    split_counts = split_values.value_counts().to_dict()
 
     return {
         "images": len(frame),
@@ -271,28 +451,61 @@ def audit_manifest(frame: pd.DataFrame) -> dict:
         "near_duplicate_pairs": near_dup_pairs,
         "groups_crossing_splits": int((crossing_groups > 1).sum()),
         "duplicate_hashes_crossing_splits": int((crossing_hashes > 1).sum()),
-        "plates_crossing_splits": int((crossing_plates > 1).sum()) if crossing_plates is not None else 0,
+        "plates_crossing_splits": int(crossing_plates),
         "train_images": int(split_counts.get("train", 0)),
         "validation_images": int(split_counts.get("val", split_counts.get("valid", 0))),
         "test_images": int(split_counts.get("test", 0)),
     }
 
 
-
 def _score(frame: pd.DataFrame) -> float:
-    """Hàm đánh giá độ lệch giữa phân bố ngẫu nhiên và tỷ lệ mục tiêu 70/15/15."""
-    total_images = len(frame)
-    total_objects = frame["class_0_count"].sum()
+    """Đánh giá lệch split theo ảnh, biển, layout và camera/source."""
+    if frame.empty:
+        return float("inf")
     score = 0.0
+    metrics = {
+        "images": pd.Series(1, index=frame.index),
+        "plates": pd.to_numeric(
+            frame.get("plate_count", frame.get("n_objects", pd.Series(0, index=frame.index))),
+            errors="coerce",
+        ).fillna(0),
+        "objects": pd.to_numeric(
+            frame.get("n_objects", pd.Series(0, index=frame.index)),
+            errors="coerce",
+        ).fillna(0),
+    }
+    for column, weight in (("layout", 1.0), ("camera_id", 0.5)):
+        if column not in frame.columns:
+            continue
+        for _, category_frame in frame.assign(_category=frame[column].replace("", "unknown")).groupby(
+            "_category"
+        ):
+            if len(category_frame) < 3:
+                continue
+            for split, target in TARGET_RATIOS.items():
+                actual = len(category_frame[category_frame["split"] == split]) / len(category_frame)
+                score += weight * abs(actual - target)
     for split, target in TARGET_RATIOS.items():
         subset = frame[frame["split"] == split]
-        score += 8.0 * abs(len(subset) / total_images - target)
-        count = subset["class_0_count"].sum()
-        score += 1_000.0 if count == 0 else 2.0 * abs(count / total_objects - target)
+        score += 8.0 * abs(len(subset) / len(frame) - target)
+        for name, values in metrics.items():
+            total = float(values.sum())
+            count = float(values.loc[subset.index].sum())
+            if total <= 0:
+                continue
+            weight = {"images": 8.0, "plates": 4.0, "objects": 2.0}[name]
+            score += weight * abs(count / total - target)
+        if subset.empty:
+            score += 1_000.0
     return score
 
 
-def find_group_safe_split(frame: pd.DataFrame, seed: int = 42, trials: int = 1000) -> pd.DataFrame:
+def find_group_safe_split(
+    frame: pd.DataFrame,
+    seed: int = 42,
+    trials: int = 1000,
+    require_identity: bool = False,
+) -> pd.DataFrame:
     """Tìm cách chia Group-Safe Split tối ưu nhất thông qua phương pháp thử nghiệm nhiều hạt giống (trials).
 
     Args:
@@ -303,6 +516,25 @@ def find_group_safe_split(frame: pd.DataFrame, seed: int = 42, trials: int = 100
     Returns:
         pd.DataFrame: Bảng manifest chứa cột 'split' mới (train, val, test).
     """
+    required = {"group_id", "image_path", "n_objects"}
+    if missing := required - set(frame.columns):
+        raise ValueError(f"Manifest thiếu các cột bắt buộc để chia split: {sorted(missing)}")
+    if trials <= 0:
+        raise ValueError("Số lần thử split (trials) phải lớn hơn 0.")
+    if require_identity:
+        if "plate_identity" not in frame.columns and "plate_identity_hash" not in frame.columns:
+            raise ValueError("Protocol B yêu cầu plate_identity hoặc plate_identity_hash trong manifest.")
+        identities = pd.Series("", index=frame.index, dtype=str)
+        if "plate_identity" in frame.columns:
+            identities = frame["plate_identity"].map(normalize_plate_identity)
+        if "plate_identity_hash" in frame.columns:
+            hashes = frame["plate_identity_hash"].map(normalize_plate_identity)
+            identities = identities.where(identities != "", hashes)
+        if identities.eq("").any():
+            raise ValueError("Protocol B không cho phép identity rỗng.")
+    if frame["group_id"].nunique() < 3:
+        raise RuntimeError("Cần ít nhất 3 group độc lập để tạo train/val/test.")
+
     best, best_score = None, float("inf")
     for trial in range(trials):
         outer = GroupShuffleSplit(n_splits=1, test_size=0.30, random_state=seed + trial)
@@ -344,7 +576,11 @@ def materialize_split(frame: pd.DataFrame, destination: Path) -> Path:
 
     for row in frame.itertuples():
         source_image, source_label = Path(row.image_path), Path(row.label_path)
-        name = f"{row.original_split}__{source_image.name}" if row.image_name in duplicate_names else source_image.name
+        name = (
+            f"{row.original_split}__{source_image.name}"
+            if row.image_name in duplicate_names
+            else source_image.name
+        )
         image_dir, label_dir = destination / row.split / "images", destination / row.split / "labels"
         image_dir.mkdir(parents=True, exist_ok=True)
         label_dir.mkdir(parents=True, exist_ok=True)
@@ -357,11 +593,17 @@ def materialize_split(frame: pd.DataFrame, destination: Path) -> Path:
     output.to_csv(destination / "split_manifest.csv", index=False)
 
     yaml_path = destination.parent / "data.yaml"
-    yaml_path.write_text(yaml.safe_dump({
-        "path": str(destination.resolve()),
-        "train": "train/images",
-        "val": "val/images",
-        "test": "test/images",
-        "names": CLASS_NAMES,
-    }, sort_keys=False), encoding="utf-8")
+    yaml_path.write_text(
+        yaml.safe_dump(
+            {
+                "path": str(destination.resolve()),
+                "train": "train/images",
+                "val": "val/images",
+                "test": "test/images",
+                "names": CLASS_NAMES,
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     return yaml_path

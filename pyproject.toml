@@ -1,3 +1,50 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vietnamese-license-plate-recognition"
+version = "1.0.0"
+description = "End-to-end ALPR cho ảnh tĩnh từ camera/cổng kiểm soát tại Việt Nam"
+requires-python = ">=3.11"
+dependencies = [
+    "ultralytics==8.3.227",
+    "easyocr==1.7.2",
+    "opencv-python-headless==4.11.0.86",
+    "numpy>=1.26,<3",
+    "pandas>=2.2,<3",
+    "scikit-learn>=1.5,<2",
+    "PyYAML>=6,<7",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "python-multipart>=0.0.9,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "ruff>=0.9,<1"]
+
+[project.scripts]
+vlpr-prepare = "prepare_dataset:main"
+vlpr-train = "train:main"
+vlpr-predict = "predict:main"
+vlpr-evaluate-detector = "evaluate_detector:main"
+vlpr-evaluate-ocr-dev = "evaluate_ocr:main"
+vlpr-evaluate-final = "evaluate_end_to_end:main"
+vlpr-evaluate-ablation = "evaluate_ablation:main"
+
+[tool.setuptools]
+packages = ["src", "app"]
+py-modules = [
+    "evaluate_ablation",
+    "evaluate_detector",
+    "evaluate_end_to_end",
+    "evaluate_ocr",
+    "export_model",
+    "predict",
+    "prepare_dataset",
+    "train",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --basetemp=./.pytest_tmp"

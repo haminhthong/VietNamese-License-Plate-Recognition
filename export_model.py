@@ -16,7 +16,9 @@ def main() -> None:
     parser.add_argument("--weights", type=Path, required=True, help="Đường dẫn tới tệp trọng số best.pt")
     parser.add_argument("--imgsz", type=int, default=640, help="Kích thước ảnh đầu vào (mặc định: 640)")
     parser.add_argument("--dynamic", action="store_true", help="Kích hoạt batch size và kích thước ảnh động")
-    parser.add_argument("--simplify", action="store_true", help="Tối ưu rút gọn đồ thị ONNX (yêu cầu onnxsim)")
+    parser.add_argument(
+        "--simplify", action="store_true", help="Tối ưu rút gọn đồ thị ONNX (yêu cầu onnxsim)"
+    )
     args = parser.parse_args()
 
     if not args.weights.is_file():
@@ -24,7 +26,11 @@ def main() -> None:
     if args.imgsz <= 0:
         raise ValueError("Kích thước imgsz phải là số nguyên dương (> 0).")
 
-    logger.info("Đang thực hiện xuất mô hình YOLOv8 sang định dạng ONNX (imgsz=%d, dynamic=%s)...", args.imgsz, args.dynamic)
+    logger.info(
+        "Đang thực hiện xuất mô hình YOLOv8 sang định dạng ONNX (imgsz=%d, dynamic=%s)...",
+        args.imgsz,
+        args.dynamic,
+    )
     exported_path = YOLO(str(args.weights)).export(
         format="onnx",
         imgsz=args.imgsz,

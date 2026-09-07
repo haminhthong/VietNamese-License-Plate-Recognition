@@ -17,6 +17,7 @@ import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
+from src.config import RecognitionConfig
 from src.pipeline import LicensePlateRecognizer
 
 from .schemas import HealthResponse, LivenessResponse, PredictionResponse, ReadinessResponse
@@ -44,7 +45,9 @@ def get_recognizer() -> LicensePlateRecognizer:
     weights = model_weights_path()
     if not weights.is_file():
         raise FileNotFoundError(f"Không tìm thấy tệp trọng số mô hình YOLOv8: {weights}")
-    return LicensePlateRecognizer(weights)
+    config_path = os.getenv("RECOGNITION_CONFIG")
+    config = RecognitionConfig.from_yaml(config_path) if config_path else RecognitionConfig()
+    return LicensePlateRecognizer(weights, config=config)
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -74,7 +77,7 @@ def health_live() -> LivenessResponse:
 
 @app.get("/health/ready", response_model=ReadinessResponse)
 def health_ready() -> ReadinessResponse:
-    """Kiểm tra mô hình đã nạp và dịch vụ sẵn sàng nhận yêu cầu (Readiness Probe)."""
+    """Kiểm tra tệp trọng số tồn tại để dịch vụ có thể khởi tạo model khi cần."""
     weights = model_weights_path()
     available = weights.is_file()
     if not available:
@@ -103,18 +106,25 @@ async def predict(image: Annotated[UploadFile, File()]) -> PredictionResponse:
     try:
         async with INFERENCE_SEMAPHORE:
             raw_preds = await asyncio.to_thread(recognizer.predict, decoded)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
-        raise HTTPException(status_code=500, detail="Xảy ra lỗi trong quá trình thực thi suy luận mô hình.") from error
+        raise HTTPException(
+            status_code=500, detail="Xảy ra lỗi trong quá trình thực thi suy luận mô hình."
+        ) from error
 
     formatted_preds = []
     for item in raw_preds:
         recognition = {
             "raw_text": item.get("raw_text", ""),
-            "text": item.get("text", ""),
+            "normalized_text": item.get("normalized_text", item.get("raw_text", "")),
+            "text": item.get("normalized_text", item.get("raw_text", "")),
             "format_valid": item.get("format_valid", False),
             "template": item.get("template"),
             "correction_cost": item.get("correction_cost", 0.0),
+            "correction_suggestion": item.get("correction_suggestion"),
             "correction_applied": item.get("correction_applied", False),
+            "plate_pattern_version": item.get("plate_pattern_version", "civilian-v1"),
         }
         scores = {
             "detector_confidence": item.get("detection_confidence", 0.0),
@@ -127,19 +137,24 @@ async def predict(image: Annotated[UploadFile, File()]) -> PredictionResponse:
             "reasons": item.get("review_reasons", []),
         }
         latencies = {
-            "image_pipeline_latency_ms": item.get("image_pipeline_latency_ms", item.get("pipeline_latency_ms", 0.0)),
+            "image_pipeline_latency_ms": item.get(
+                "image_pipeline_latency_ms", item.get("pipeline_latency_ms", 0.0)
+            ),
             "plate_ocr_latency_ms": item.get("plate_ocr_latency_ms", 0.0),
             "detector_latency_ms": item.get("detector_latency_ms", 0.0),
         }
-        formatted_preds.append({
-            **item,
-            "recognition": recognition,
-            "scores": scores,
-            "review": review,
-            "latencies": latencies,
-        })
+        formatted_preds.append(
+            {
+                **item,
+                "recognition": recognition,
+                "scores": scores,
+                "review": review,
+                "latencies": latencies,
+            }
+        )
 
     return PredictionResponse(
+        model_version=os.getenv("MODEL_VERSION", "unknown"),
         filename=image.filename,
         latency_ms=recognizer.last_latency_ms,
         predictions=formatted_preds,

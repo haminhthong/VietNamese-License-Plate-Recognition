@@ -1,23 +1,20 @@
+# Môi trường và cache Python
+.venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.venv/
-venv/
-.env
-dataset/
-runs/
-outputs/
-annotations/
-artifacts/
-*.pt
-*.onnx
-*.zip
-*.zip.zip
-*.jpg
-*.jpeg
-*.png
-!docs/*.png
-models/
 .pytest_tmp/
 .ruff_cache/
-.coverage
+
+# Artifact sinh ra khi chạy train/evaluate/inference
+artifacts/
+outputs/
+runs/
+
+# Dữ liệu và trọng số cục bộ, không đưa lên repository
+dataset/
+models/
+data/raw/
+data/e2e/
+*.pt
+*.onnx

@@ -19,11 +19,14 @@ from src.rectification import order_points, rectify_plate
 
 
 def test_post_processing_keeps_raw_result_visible():
-    """Kiểm tra quy tắc chuẩn hóa và tự động sửa lỗi OCR theo template mẫu."""
+    """Kiểm tra raw OCR bất biến và correction chỉ là suggestion."""
     result = validate_and_correct_plate("51FI2345")
     assert result["raw_text"] == "51FI2345"
-    assert result["text"] == "51F12345"
-    assert result["format_valid"] is True
+    assert result["normalized_text"] == "51FI2345"
+    assert result["text"] == "51FI2345"
+    assert result["format_valid"] is False
+    assert result["correction_suggestion"] == "51F12345"
+    assert result["correction_applied"] is False
     assert result["correction_cost"] == 1.0
     assert normalize_plate_text(" 51F-123.45 ") == "51F12345"
     assert normalize_plate_text("51À12345") == "5112345"
@@ -116,7 +119,10 @@ def test_error_analysis_classification():
     assert classify_error("51F12345", "", "", detected=True, iou=0.3) == "iou_poor"
     assert classify_error("51F12345", "51F12345", "51F12345", detected=True, iou=0.3) == "iou_poor"
     assert classify_error("51F12345", "51F1234", "51F1234", detected=True, iou=0.8) == "ocr_wrong"
-    assert classify_error("51F12345", "51F12345", "51F12346", detected=True, iou=0.8) == "template_over_correction"
+    assert (
+        classify_error("51F12345", "51F12345", "51F12346", detected=True, iou=0.8)
+        == "template_over_correction"
+    )
 
 
 def test_phash_helpers_and_dataset_audit():
@@ -146,10 +152,12 @@ def test_recognition_config_from_yaml_and_validation(tmp_path):
 
 
 def test_reliability_policy_and_review_reasons():
-    """Kiểm tra tính toán Reliability Score và phát hiện lý do cần kiểm duyệt thủ công."""
+    """Kiểm tra decision policy dùng gate rõ ràng và giữ score ở dạng diagnostic."""
     from src.ocr import evaluate_plate_reliability
 
-    cfg = RecognitionConfig(detection_confidence=0.25, ocr_minimum_confidence=0.20, min_reliability_score=0.70)
+    cfg = RecognitionConfig(
+        detection_confidence=0.25, ocr_minimum_confidence=0.20, min_reliability_score=0.70
+    )
     score, reasons, needs_review = evaluate_plate_reliability(0.95, 0.85, 0.75, True, 0.0, cfg)
     assert score > 0.70
     assert not needs_review
@@ -161,6 +169,49 @@ def test_reliability_policy_and_review_reasons():
     assert "INVALID_FORMAT" in reasons_low
     assert "LOW_DETECTION_SCORE" in reasons_low
     assert "HIGH_CORRECTION_COST" in reasons_low
+
+
+def test_correction_suggestion_always_requires_review():
+    """Một suggestion một ký tự cũng không được auto-accept."""
+    from src.decision import decide_plate
+
+    policy = decide_plate(
+        raw_text="51FI2345",
+        detection_confidence=0.99,
+        ocr_confidence=0.99,
+        consensus_ratio=1.0,
+        format_valid=False,
+        correction_suggestion="51F12345",
+        config=RecognitionConfig(),
+    )
+    assert policy["decision"] == "REVIEW"
+    assert "CORRECTION_SUGGESTED" in policy["review_reasons"]
+
+
+def test_decision_metrics_prioritize_auto_accept_precision():
+    """Kiểm tra metric decision không nhầm coverage với độ chính xác."""
+    from src.metrics import compute_decision_metrics
+
+    metrics = compute_decision_metrics(
+        [
+            {
+                "ground_truth": "51F12345",
+                "accepted_prediction": "51F12345",
+                "decision": "ACCEPT",
+                "detected": True,
+            },
+            {
+                "ground_truth": "30A12345",
+                "accepted_prediction": "30A12346",
+                "decision": "ACCEPT",
+                "detected": True,
+            },
+            {"ground_truth": "43B11111", "decision": "REVIEW", "detected": True},
+        ]
+    )
+    assert metrics["auto_accept_exact_precision"] == 0.5
+    assert metrics["auto_accept_coverage"] == 2 / 3
+    assert metrics["review_rate"] == 1 / 3
 
 
 def test_advanced_metrics_and_confusion_matrix():
@@ -210,13 +261,14 @@ def test_plate_identity_grouping_in_dsu():
     """Kiểm tra tính năng gộp theo plate_identity trong _merge_groups_connected_by_hash (Protocol B)."""
     from src.dataset import _merge_groups_connected_by_hash
 
-    df = pd.DataFrame({
-        "group_id": ["cam1_01", "cam2_05"],
-        "original_split": ["train", "val"],
-        "md5": ["hash1", "hash2"],
-        "phash": ["0000000000000000", "ffffffffffffffff"],
-        "plate_identity": ["51F12345", "51F12345"],
-    })
+    df = pd.DataFrame(
+        {
+            "group_id": ["cam1_01", "cam2_05"],
+            "original_split": ["train", "val"],
+            "md5": ["hash1", "hash2"],
+            "phash": ["0000000000000000", "ffffffffffffffff"],
+            "plate_identity": ["51F12345", "51F12345"],
+        }
+    )
     merged = _merge_groups_connected_by_hash(df)
     assert merged["group_id"].nunique() == 1
-
