@@ -11,6 +11,7 @@ xếp hạng ứng viên OCR.
 
 from __future__ import annotations
 
+from importlib import resources as package_resources
 from pathlib import Path
 from typing import Any
 
@@ -49,8 +50,19 @@ DEFAULT_PLATE_TEMPLATES = {
 }
 
 
-def _resource_path(filename: str) -> Path:
-    return Path(__file__).resolve().parent.parent / "resources" / filename
+def _load_yaml_resource(filename: str) -> tuple[Any | None, Any]:
+    """Đọc resource từ source tree trước, sau đó thử resource đã đóng gói trong wheel."""
+    source_path = Path(__file__).resolve().parent.parent / "resources" / filename
+    if source_path.is_file():
+        return source_path, yaml.safe_load(source_path.read_text(encoding="utf-8"))
+
+    try:
+        packaged = package_resources.files("resources").joinpath(filename)
+        if packaged.is_file():
+            return packaged, yaml.safe_load(packaged.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ModuleNotFoundError):
+        pass
+    return None, None
 
 
 def normalize_plate_text(text: str | None) -> str:
@@ -63,11 +75,10 @@ def normalize_plate_text(text: str | None) -> str:
 
 def load_plate_templates() -> dict[int, list[str]]:
     """Nạp mẫu biển số từ YAML; chỉ dùng mặc định khi tệp chưa tồn tại."""
-    path = _resource_path("plate_templates.yaml")
-    if not path.is_file():
+    path, payload = _load_yaml_resource("plate_templates.yaml")
+    if path is None:
         return DEFAULT_PLATE_TEMPLATES.copy()
 
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or not isinstance(payload.get("templates"), dict):
         raise ValueError(f"Tệp mẫu biển số không hợp lệ: {path}")
     return {
@@ -78,11 +89,10 @@ def load_plate_templates() -> dict[int, list[str]]:
 
 def load_ocr_substitutions() -> tuple[dict[str, str], dict[str, str]]:
     """Nạp bảng nhầm lẫn OCR từ YAML; chỉ dùng mặc định khi tệp chưa tồn tại."""
-    path = _resource_path("ocr_confusions.yaml")
-    if not path.is_file():
+    path, payload = _load_yaml_resource("ocr_confusions.yaml")
+    if path is None:
         return DEFAULT_DIGIT_SUBSTITUTIONS.copy(), DEFAULT_LETTER_SUBSTITUTIONS.copy()
 
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Tệp nhầm lẫn OCR không hợp lệ: {path}")
     digit_substitutions = payload.get("digit_substitutions", DEFAULT_DIGIT_SUBSTITUTIONS)

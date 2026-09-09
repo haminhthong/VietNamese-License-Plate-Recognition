@@ -204,7 +204,7 @@ class RecognitionConfig:
         )
         for field_name in numeric_fields:
             value = getattr(self, field_name)
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
+            if not isinstance(value, int | float) or isinstance(value, bool):
                 raise TypeError(f"Tham số '{field_name}' phải là số.")
         for field_name in (
             "detector_candidate_threshold",
@@ -216,7 +216,7 @@ class RecognitionConfig:
             if not 0 <= value <= 1:
                 raise ValueError(f"Tham số '{field_name}' phải nằm trong khoảng [0, 1].")
         if self.detection_confidence is not None:
-            if not isinstance(self.detection_confidence, (int, float)) or isinstance(
+            if not isinstance(self.detection_confidence, int | float) or isinstance(
                 self.detection_confidence, bool
             ):
                 raise TypeError("Tham số 'detection_confidence' phải là số.")
@@ -279,3 +279,28 @@ class RecognitionConfig:
             raise ValueError(f"Tệp cấu hình chứa các khóa không được hỗ trợ: {sorted(unknown)}")
 
         return cls(**payload)
+
+    def override(
+        self,
+        *,
+        detector_candidate_threshold: float | None = None,
+        auto_accept_detector_threshold: float | None = None,
+        ocr_threshold: float | None = None,
+        padding_ratio: float | None = None,
+        single_variant_mode: str | None = None,
+    ) -> RecognitionConfig:
+        """Tạo cấu hình mới từ YAML và chỉ ghi đè các giá trị CLI đã được truyền."""
+        values: dict[str, Any] = {}
+        for name, value in {
+            "detector_candidate_threshold": detector_candidate_threshold,
+            "auto_accept_detector_threshold": auto_accept_detector_threshold,
+            "ocr_threshold": ocr_threshold,
+            "padding_ratio": padding_ratio,
+            "single_variant_mode": single_variant_mode,
+        }.items():
+            if value is not None:
+                values[name] = value
+        if detector_candidate_threshold is not None:
+            # Bỏ alias legacy để giá trị CLI canonical không bị __post_init__ ghi đè lại.
+            values["detection_confidence"] = None
+        return replace(self, **values)

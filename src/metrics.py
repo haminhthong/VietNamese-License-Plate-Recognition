@@ -128,24 +128,55 @@ def match_ground_truth_boxes(
         iou_threshold (float): Ngưỡng IoU tối thiểu để coi là khớp.
 
     Returns:
-        list[dict[str, Any]]: Danh sách các kết quả khớp nối.
+        list[dict[str, Any]]: Kết quả theo thứ tự ground truth, gồm prediction,
+        matched, candidate_found và IoU tốt nhất/được ghép.
     """
-    unused = set(range(len(predictions)))
+    if not 0 < iou_threshold <= 1:
+        raise ValueError("iou_threshold phải nằm trong khoảng (0, 1].")
+    truth_rows = list(ground_truths.itertuples(index=False))
+    if not truth_rows:
+        return []
+
+    # Ghép theo toàn bộ cạnh IoU giảm dần. Cách này ổn định hơn việc duyệt
+    # ground truth tuần tự, vì một box tốt không bị chiếm bởi một ghép cục bộ.
+    edges = [
+        (
+            box_iou((truth.x1, truth.y1, truth.x2, truth.y2), prediction["box"]),
+            truth_index,
+            prediction_index,
+        )
+        for truth_index, truth in enumerate(truth_rows)
+        for prediction_index, prediction in enumerate(predictions)
+    ]
+    best_iou_by_truth = {
+        truth_index: max((edge[0] for edge in edges if edge[1] == truth_index), default=0.0)
+        for truth_index in range(len(truth_rows))
+    }
+    assigned_truths: set[int] = set()
+    assigned_predictions: set[int] = set()
+    assignments: dict[int, tuple[int, float]] = {}
+    for iou, truth_index, prediction_index in sorted(edges, reverse=True):
+        if iou < iou_threshold:
+            break
+        if truth_index in assigned_truths or prediction_index in assigned_predictions:
+            continue
+        assigned_truths.add(truth_index)
+        assigned_predictions.add(prediction_index)
+        assignments[truth_index] = prediction_index, iou
+
     matched_results = []
-    for truth in ground_truths.itertuples(index=False):
-        truth_box = (truth.x1, truth.y1, truth.x2, truth.y2)
-        candidates = [(index, box_iou(truth_box, predictions[index]["box"])) for index in unused]
-        prediction_index, best_iou = max(candidates, key=lambda item: item[1], default=(None, 0.0))
-        matched = prediction_index is not None and best_iou >= iou_threshold
+    for truth_index, truth in enumerate(truth_rows):
+        assignment = assignments.get(truth_index)
+        matched = assignment is not None
+        prediction_index, matched_iou = assignment if assignment else (None, best_iou_by_truth[truth_index])
         prediction = predictions[prediction_index] if matched else {"raw_text": "", "text": ""}
-        if matched:
-            unused.remove(prediction_index)
         matched_results.append(
             {
                 "truth": truth,
                 "prediction": prediction,
                 "matched": matched,
-                "iou": best_iou,
+                "candidate_found": best_iou_by_truth[truth_index] > 0,
+                "iou": matched_iou,
             }
         )
     return matched_results

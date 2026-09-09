@@ -1,10 +1,26 @@
 # 🚗 Vietnamese Automatic License Plate Recognition (VLPR) Platform
 
+[![CI](https://github.com/haminhthong/vietnamese-license-plate-recognition/actions/workflows/ci.yml/badge.svg)](https://github.com/haminhthong/vietnamese-license-plate-recognition/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![YOLOv8](https://img.shields.io/badge/Detector-YOLOv8-111111)](https://github.com/ultralytics/ultralytics)
+[![EasyOCR](https://img.shields.io/badge/OCR-EasyOCR-2E7D32)](https://github.com/JaidedAI/EasyOCR)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Docker](https://img.shields.io/badge/Runtime-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Hệ thống nhận diện biển số xe Việt Nam cho **ảnh tĩnh từ camera/cổng kiểm soát**, dựa trên **YOLOv8**, **OpenCV** và **EasyOCR**. Pipeline tách rõ bốn tầng: localization → raw OCR → pattern validation/suggestion → quyết định `ACCEPT`/`REVIEW`/`REJECT`.
 
 Repository gồm package `src/`, REST API FastAPI, Web UI, CLI huấn luyện/đánh giá và Dockerfile chạy non-root. Ảnh dữ liệu, trọng số và artifact benchmark không được commit sẵn; README chỉ mô tả những gì code hiện thực.
 
 ---
+
+## Bài toán và phạm vi ứng dụng (Problem & Scope)
+
+Đầu vào là ảnh xe; đầu ra là danh sách tọa độ biển số, chuỗi OCR và quyết định
+`ACCEPT`/`REVIEW`/`REJECT` cho từng candidate. Ứng dụng hướng đến hỗ trợ người
+vận hành camera/cổng kiểm soát với ảnh tĩnh, biển dân sự một hoặc hai dòng.
+Chưa triển khai video, tracking hay tích hợp điều khiển cổng. Các quy tắc định
+dạng chỉ kiểm tra cú pháp; độ chính xác phải được đo bằng annotation thực tế.
 
 ## 🎯 Bảng Bằng Chứng Kỹ Thuật (Verified Evidence Matrix)
 
@@ -25,7 +41,7 @@ Repository gồm package `src/`, REST API FastAPI, Web UI, CLI huấn luyện/đ
 | **Group Leakage Control (Protocol A)** | *Đo khi prepare dataset* | MD5/pHash/capture group được gộp trước split |
 | **Plate-Identity Split (Protocol B)** | *Bắt buộc metadata* | `plate_identity` không được cross train/dev/test |
 | **Ablation Benchmark** | *Chỉ trên development* | Không được dùng locked test để tune |
-| **Automated Tests** | **22 test case hiện có** | Chạy `pytest` sau khi cài `requirements-dev.txt` |
+| **Automated Tests** | **23 test case hiện có** | Chạy `python -m pytest` sau khi cài package |
 
 ---
 
@@ -57,25 +73,81 @@ Repository gồm package `src/`, REST API FastAPI, Web UI, CLI huấn luyện/đ
    Raw Consensus ──────────► Explicit Gates (detector/OCR/consensus/format) ──► ACCEPT / REVIEW / REJECT
 ```
 
-### Flowchart Kiến Trúc Hệ Thống (Online Inference)
+### Flowchart Kiến Trúc Hệ Thống và Báo Cáo (Canonical Process)
 
 ```mermaid
 flowchart TD
-    A[📷 Ảnh xe đầu vào] --> B[🔍 YOLOv8 Detector]
-    B -->|Bounding Box + Detector Conf| C[✂️ Crop vùng biển số + Padding]
-    C --> D[🖼️ FAST OCR: Gray / CLAHE]
-    D --> E[🔤 EasyOCR token + confidence]
-    E --> F[📐 Y-clustering và ordering 1 dòng / 2 dòng]
-    F --> G{Đủ evidence?}
-    G -->|Không| H[📐 Fallback: Rectification + Otsu / Adaptive]
-    H --> D
-    G -->|Có| I[🔀 Consensus raw text]
-    I --> J[🎯 Pattern validation + correction suggestion]
-    J --> K[📊 Explicit Decision Policy]
-    K -->|Gate đạt| L[✅ ACCEPT]
-    K -->|Evidence thiếu hoặc có suggestion| M[⚠️ REVIEW]
-    K -->|Không đọc được / crop nhỏ| N[⛔ REJECT]
+    A[Ảnh và annotation nguồn] --> B[collect_manifest]
+    B --> C[audit MD5 pHash identity capture group]
+    C --> D[DSU grouping và group-safe split]
+    D --> E[materialize_split]
+    E --> F[split_manifest.csv + YOLO images/labels]
+    E --> G[data.yaml]
+    G --> H[train.py + configs/train.yaml]
+    H --> I[YOLOv8 train]
+    I --> J[best.pt + experiment.json lineage]
+
+    K[configs/recognition.yaml] --> L[RecognitionConfig validation]
+    J --> M[best.pt weights]
+    L --> N
+    M --> N
+    N[Runtime: weights + config + ảnh đầu vào] --> O{Quality gate ảnh}
+    O -->|Không đạt| P[ValueError: API trả HTTP 422]
+    O -->|Đạt| Q[YOLOv8 detector]
+    Q --> R{Candidate >= 0.10}
+    R -->|Không| S[Danh sách predictions rỗng]
+    R -->|Có| T[Crop + padding + layout]
+    T --> TC{ROI đủ kích thước?}
+    TC -->|Không| AF
+    TC -->|Có| U[Gray và CLAHE OCR variants]
+    U --> V{Evidence đủ?}
+    V -->|Không| W[Rectification + Otsu/Adaptive fallback]
+    W --> X[EasyOCR tokens fallback]
+    V -->|Có| Y[Filter token + Y-clustering + ordering]
+    X --> Y
+    Y --> Z[Consensus raw text]
+    Z --> AA[ASCII normalize + grammar validation]
+    AA --> AB[Correction suggestion, không tự động apply]
+    AB --> AC[Decision gates detector/OCR/consensus/format]
+    AC -->|Đủ gate| AD[ACCEPT: accepted_text = raw]
+    AC -->|Thiếu evidence hoặc có suggestion| AE[REVIEW: giữ raw + suggestion]
+    AC -->|Không đọc được hoặc ROI nhỏ| AF[REJECT]
+
+    G --> AG[evaluate_detector locked test]
+    M --> AG
+    AG --> AH[detector metrics JSON]
+    K --> AI[evaluate_ocr development]
+    AI --> AJ[raw/suggestion OCR metrics]
+    M --> AK[evaluate_ablation development]
+    AK --> AL[ablation JSON + CSV]
+    K --> AM[evaluate_end_to_end locked test]
+    M --> AM
+    AM --> AN[IoU matching + OCR/decision/error reports]
+    AO[GitHub Actions CI] --> AP[editable install]
+    AP --> AQ[pip check + format + lint + pytest + wheel build]
 ```
+
+Sơ đồ này là quy trình kỹ thuật duy nhất chi phối code, cấu hình và báo cáo:
+`configs/recognition.yaml` được nạp bởi API, `predict.py`,
+`evaluate_ocr.py` và `evaluate_end_to_end.py`; `evaluate_ablation.py` tạo
+ma trận cấu hình riêng có chủ đích để đo ảnh hưởng từng thành phần. Nhánh
+`dev` chỉ dùng tuning/ablation, còn `split=test` là locked test sau khi policy
+đã freeze.
+
+### Luồng dữ liệu runtime
+
+| Giai đoạn | Dữ liệu vào | Xử lý chính | Dữ liệu ra |
+|---|---|---|---|
+| Quality gate | ảnh BGR `numpy.ndarray` | kích thước, blur, phơi sáng | ảnh hợp lệ hoặc lỗi `ValueError` |
+| Detection | ảnh + YOLO weights | giữ candidate, NMS | box, class, detector confidence |
+| ROI | ảnh + box | crop, padding chặn biên | crop, padded box, layout |
+| OCR | crop | gray/CLAHE; fallback rectification/Otsu/adaptive | token, text, confidence, variant |
+| Reconstruction | token + geometry | filter, gom dòng, ordering, consensus | raw text, consensus ratio |
+| Grammar | raw text | normalize ASCII, match template, suggestion | normalized text, format validity |
+| Decision | mọi score/evidence | gate độc lập | decision và review reasons |
+
+`correction_suggestion` chỉ là gợi ý ở policy `1.0.0`; `correction_applied`
+luôn `false`. `accepted_text` chỉ được điền khi `decision=ACCEPT`.
 
 ---
 
@@ -85,17 +157,17 @@ Bảng so sánh 5 cấu hình pipeline chính cùng khảo sát tỷ lệ Crop P
 
 | Phiên bản | Detector | Preprocessing OCR | Nắn ảnh (Deskew) | Hậu xử lý Template | Exact Accuracy (%) | CER | Mean Latency (ms) | P95 Latency (ms) |
 |---|---|---|---|---|---:|---:|---:|---:|
-| **B0** | YOLOv8 | Crop gốc | Không | Không | *Chưa đo* | *Chưa đo* | Baseline | Baseline |
-| **B1** | YOLOv8 | Gray | Không | Không | *Chưa đo* | *Chưa đo* | Tiêu chuẩn | Tiêu chuẩn |
-| **B2** | YOLOv8n | Gray + CLAHE rồi fallback threshold | Không | Không | *Chưa đo* | *Chưa đo* | Trung bình | Trung bình |
-| **B3** | YOLOv8n | Adaptive cascade | Fallback (Perspective) | Không | *Chưa đo* | *Chưa đo* | Trung bình | Trung bình |
+| **B0** | Cùng weights | Crop gốc | Không | Không | *Chưa đo* | *Chưa đo* | *Chưa đo* | *Chưa đo* |
+| **B1** | Cùng weights | Gray | Không | Không | *Chưa đo* | *Chưa đo* | *Chưa đo* | *Chưa đo* |
+| **B2** | Cùng weights | Gray + CLAHE rồi fallback threshold | Không | Không | *Chưa đo* | *Chưa đo* | *Chưa đo* | *Chưa đo* |
+| **B3** | Cùng weights | Adaptive cascade | Fallback (Perspective) | Không | *Chưa đo* | *Chưa đo* | *Chưa đo* | *Chưa đo* |
 | **Final** | YOLOv8n | Adaptive cascade | Fallback (Perspective) | Suggestion only | *Chưa đo* | *Chưa đo* | *Chưa đo* | *Chưa đo* |
 
 ---
 
 ## 🛡️ Phân Tầng Model Layer & Decision Layer (API Response Architecture)
 
-Dịch vụ REST API tách biệt rõ giữa **Model Layer** (nhận dạng thô & độ tin cậy mô hình) và **Decision Layer** (chính sách kiểm duyệt bãi xe):
+Dịch vụ REST API tách biệt rõ giữa **Model Layer** (nhận dạng thô & độ tin cậy mô hình) và **Decision Layer** (chính sách kiểm duyệt bãi xe). Ví dụ rút gọn dưới đây lược bớt một số trường phẳng; contract đầy đủ nằm trong `app/schemas.py` và `/docs`:
 
 ```json
 {
@@ -127,7 +199,7 @@ Dịch vụ REST API tách biệt rõ giữa **Model Layer** (nhận dạng thô
         "detector_confidence": 0.95,
         "ocr_confidence": 0.88,
         "ocr_consensus_ratio": 0.75,
-        "reliability_score": 0.79
+        "reliability_score": 0.645
       },
       "review": {
         "required": true,
@@ -167,7 +239,23 @@ app/
 configs/              # Cấu hình YAML nhận diện/huấn luyện
 resources/            # Template biển số và bảng nhầm lẫn OCR
 tests/                # Unit/API tests
+evaluate_detector.py  # Đánh giá detector trên test split
+evaluate_ocr.py       # Đánh giá OCR trên development split
+evaluate_end_to_end.py # Đánh giá E2E, IoU matching và error analysis
+evaluate_ablation.py  # Ablation preprocessing/rectification/padding
+prepare_dataset.py    # Tạo manifest, split và data.yaml
+train.py              # Huấn luyện và ghi experiment lineage
+predict.py            # CLI nhận diện một ảnh
+export_model.py       # Export ONNX tùy chọn
+.github/workflows/    # Workflow CI
+pyproject.toml        # Metadata package, entrypoints, pytest, ruff
+Dockerfile            # Runtime API non-root
 ```
+
+Các thư mục `dataset/`, `models/`, `runs/`, `artifacts/`, `outputs/` và file
+weights là dữ liệu/đầu ra cục bộ nên đã được ignore. `data/README.md` được giữ
+lại vì là data card mô tả schema và chính sách dữ liệu, không phải tài liệu
+trùng lặp với README này.
 
 Các ngưỡng runtime nằm trong `configs/recognition.yaml`. Mặc định detector
 giữ candidate từ `0.10`, nhưng chỉ `0.50` trở lên mới đủ gate detector cho
@@ -196,7 +284,7 @@ giữ candidate để không bỏ sót và chấp nhận tự động có kiểm
 
 ---
 
-## 📋 Phạm Vi Hỗ Trợ & Ràng Buộc (Scope & Constraints)
+## ⚙️ Quality Gate và Giới Hạn Vận Hành
 
 ### 🟢 Hỗ trợ hiện tại:
 - Ảnh tĩnh: JPEG, PNG, WebP.
@@ -219,7 +307,7 @@ giữ candidate để không bỏ sót và chấp nhận tự động có kiểm
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements-dev.txt
+python -m pip install -e ".[dev]"
 ```
 
 ### 2. Chuẩn bị dữ liệu YOLO:
@@ -251,7 +339,7 @@ python export_model.py --weights models/best.pt --imgsz 640
 
 ### 4. Chạy CLI hoặc REST API:
 ```powershell
-python predict.py --weights models/best.pt --source sample/car.jpg --output outputs/prediction.jpg
+python predict.py --weights models/best.pt --source sample/car.jpg --output outputs/prediction.jpg --config configs/recognition.yaml
 ```
 
 Chạy REST API và Web UI Dashboard:
@@ -264,16 +352,25 @@ uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload
 - **Readiness Probe:** `GET /health/ready`
 
 ### 5. Đánh giá Development và Locked Test:
+
+OCR-only cần CSV riêng có `crop_path,plate_text,split` và `layout` tùy chọn.
+Ablation/E2E cần `image_path,x1,y1,x2,y2,plate_text,split` với tọa độ pixel.
+Các đường dẫn ảnh tương đối được giải theo thư mục chứa CSV.
+
+```bash
+python evaluate_ocr.py --annotations data/e2e/ocr_development.csv --config configs/recognition.yaml
+```
+
 ```bash
 # Ablation/OCR tuning chỉ được chạy trên development.csv
 python evaluate_ablation.py --weights models/best.pt --annotations data/e2e/development.csv
 
 # Final E2E chỉ đọc locked test.csv sau khi đã freeze policy
-python evaluate_end_to_end.py --weights models/best.pt --annotations data/e2e/test.csv
+python evaluate_end_to_end.py --weights models/best.pt --annotations data/e2e/test.csv --config configs/recognition.yaml
 ```
 
 Hai file `data/e2e/*.csv` không được phân phối trong repository. Canonical
-evaluator yêu cầu cột `split`: `development` cho ablation/OCR tuning và `test`
+evaluator yêu cầu cột `split`: `dev` cho ablation/OCR tuning và `test`
 cho final E2E. Cờ `--allow-unlocked-annotations` chỉ dành cho dữ liệu legacy,
 không dùng để báo cáo kết quả chính thức. Detector-only dùng:
 
@@ -281,13 +378,57 @@ không dùng để báo cáo kết quả chính thức. Detector-only dùng:
 python evaluate_detector.py --weights models/best.pt --data dataset/data.yaml
 ```
 
+E2E ghép box một-một theo thứ tự IoU giảm dần, rồi xuất JSON metrics,
+CSV predictions và error analysis. Đây là phép ghép greedy, không bảo đảm
+nghiệm tối ưu toàn cục. Báo cáo tách raw OCR, suggestion và accepted text;
+coverage/precision của quyết định hiện tính trên các biển GT đã ghép được.
+Các false positive không ghép GT chưa nằm trong mẫu số decision metrics.
+Bootstrap ưu tiên nhóm identity/capture nếu annotation cung cấp.
+
+API mặc định đọc `models/best.pt` và `configs/recognition.yaml`. Có thể đổi
+bằng `MODEL_WEIGHTS`, `RECOGNITION_CONFIG`; `MODEL_VERSION` chỉ là nhãn phiên
+bản trả về. `/health/ready` hiện chỉ kiểm tra file weights tồn tại, chưa chứng
+minh model load và inference thành công. Mỗi process mặc định chạy một lượt
+inference tại một thời điểm (`MAX_CONCURRENT_INFERENCE=1`).
+
+`train.py` ghi `experiment.json` gồm hash weights, manifest, cấu hình train,
+commit và phiên bản môi trường. Manifest được tìm theo `path` của `data.yaml`.
+Wheel chứa cả grammar YAML và giao diện HTML; config nhận diện tùy chỉnh vẫn
+cần được cung cấp bằng đường dẫn khi triển khai ngoài repository.
+
 ---
 
-## 🗺️ Đốt Phá Kế Hoạch Nâng Cấp (Prioritized Roadmap)
+## ✅ CI và repo cleanliness
+
+Workflow `.github/workflows/ci.yml` chạy trên push vào `main`, pull request và
+manual dispatch. Thứ tự kiểm tra là:
+
+1. cài Python 3.11 và package ở chế độ editable bằng `pip install -e ".[dev]"`;
+2. kiểm tra dependency bằng `python -m pip check`;
+3. kiểm tra format bằng `python -m ruff format --check .`;
+4. kiểm tra lint bằng `python -m ruff check .`;
+5. chạy test bằng `python -m pytest`;
+6. build wheel trong môi trường build riêng bằng `python -m build --wheel`.
+
+Các lệnh kiểm tra local tương ứng:
+
+```powershell
+python -m pip check
+python -m ruff format --check .
+python -m ruff check .
+python -m pytest
+python -m build --wheel
+```
+
+Cache Python, file tạm, dataset, weights, output, run và artifact benchmark
+được loại khỏi Git qua `.gitignore`; chỉ commit code, config, test và tài liệu
+nguồn. Không có số benchmark giả định trong README.
+
+## 🗺️ Đột Phá Kế Hoạch Nâng Cấp (Prioritized Roadmap)
 
 | Mức ưu tiên | Hạng mục công việc | Trạng thái |
 |:---:|---|:---:|
-| 🔴 **P0** | Chuẩn hóa bảng Evidence Matrix & Ablation metrics dạng con số rõ ràng | ✅ Hoàn tất |
+| 🔴 **P0** | Chạy benchmark thực tế và công bố artifact tái lập | Chưa đo |
 | 🔴 **P0** | Phân định `format_valid` $\neq$ `recognition_correct` & Phân tầng Latency (`image` vs `plate`) | ✅ Hoàn tất |
 | 🔴 **P0** | Chuẩn hóa cấu trúc Model Layer vs Decision Layer trong REST API | ✅ Hoàn tất |
 | 🟠 **P1** | Hỗ trợ Protocol B Split (Plate-Identity Aware DSU) | ✅ Hoàn tất |

@@ -12,7 +12,7 @@ from src.io_utils import (
     resolve_relative_path,
     write_json,
 )
-from src.metrics import box_iou, levenshtein_distance, summarize_ocr
+from src.metrics import box_iou, levenshtein_distance, match_ground_truth_boxes, summarize_ocr
 from src.ocr import infer_plate_layout, normalize_plate_text, order_ocr_tokens, validate_and_correct_plate
 from src.pipeline import RecognitionConfig, crop_with_padding
 from src.rectification import order_points, rectify_plate
@@ -123,6 +123,43 @@ def test_error_analysis_classification():
         classify_error("51F12345", "51F12345", "51F12346", detected=True, iou=0.8)
         == "template_over_correction"
     )
+    assert (
+        classify_error(
+            "51F12345",
+            "51F12345",
+            "",
+            detected=True,
+            candidate_found=True,
+            iou=0.8,
+        )
+        == "decision_abstain"
+    )
+
+
+def test_box_matching_uses_global_iou_assignment():
+    """Không để ghép cục bộ làm mất ghép IoU tốt hơn của box kế tiếp."""
+    predictions = [
+        {"box": (0, 0, 10, 10), "raw_text": "A"},
+        {"box": (2, 0, 12, 10), "raw_text": "B"},
+    ]
+    truths = pd.DataFrame(
+        {
+            "x1": [1, 0],
+            "y1": [0, 0],
+            "x2": [11, 10],
+            "y2": [10, 10],
+            "plate_text": ["A", "B"],
+        }
+    )
+    matches = match_ground_truth_boxes(predictions, truths, iou_threshold=0.5)
+    assert [item["prediction"]["raw_text"] for item in matches] == ["B", "A"]
+    assert all(item["matched"] for item in matches)
+    # Candidate ở nơi khác không phải evidence định vị cho biển GT này.
+    distant = [{"box": (100, 100, 110, 110), "raw_text": "A"}]
+    missed = match_ground_truth_boxes(distant, truths)
+    assert all(not item["candidate_found"] for item in missed)
+    with pytest.raises(ValueError, match="iou_threshold"):
+        match_ground_truth_boxes(predictions, truths, iou_threshold=0)
 
 
 def test_phash_helpers_and_dataset_audit():
@@ -142,6 +179,7 @@ def test_recognition_config_from_yaml_and_validation(tmp_path):
     assert config.detection_confidence == 0.35
     assert config.nms_iou == 0.5
     assert config.image_size == 320
+    assert config.override(detector_candidate_threshold=0.2).detector_candidate_threshold == 0.2
 
     with pytest.raises(ValueError):
         RecognitionConfig(ocr_minimum_confidence=-0.1)

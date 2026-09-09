@@ -18,3 +18,9 @@ data/raw/
 data/e2e/
 *.pt
 *.onnx
+
+# Artifact đóng gói và đo coverage
+dist/
+*.egg-info/
+.coverage
+htmlcov/

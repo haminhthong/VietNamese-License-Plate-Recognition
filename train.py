@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 import torch
+import yaml
 from ultralytics import YOLO
 
 from src.config import TrainingConfig
@@ -45,6 +46,22 @@ def _split_hashes(manifest_path: Path) -> dict[str, str | None]:
         canonical = payload.to_csv(index=False).encode("utf-8")
         hashes[name] = hashlib.sha256(canonical).hexdigest()
     return hashes
+
+
+def _resolve_manifest_path(data_yaml: Path) -> Path:
+    """Tìm manifest theo `path` trong data.yaml, đúng với nơi prepare_dataset ghi ra."""
+    if not data_yaml.is_file():
+        return data_yaml.parent / "split_manifest.csv"
+    payload = yaml.safe_load(data_yaml.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return data_yaml.parent / "split_manifest.csv"
+    configured_root = payload.get("path", ".")
+    if not isinstance(configured_root, str | Path) or not str(configured_root).strip():
+        return data_yaml.parent / "split_manifest.csv"
+    dataset_root = Path(configured_root)
+    if not dataset_root.is_absolute():
+        dataset_root = (data_yaml.parent / dataset_root).resolve()
+    return dataset_root / "split_manifest.csv"
 
 
 def main() -> None:
@@ -100,7 +117,7 @@ def main() -> None:
         flipud=0.0,
     )
 
-    manifest_path = args.data.parent / "split_manifest.csv"
+    manifest_path = _resolve_manifest_path(args.data)
     lineage = _split_hashes(manifest_path)
     metadata = {
         "run_name": run_name,

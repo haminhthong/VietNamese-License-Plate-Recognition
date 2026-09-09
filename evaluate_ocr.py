@@ -8,6 +8,7 @@ import easyocr
 import pandas as pd
 import torch
 
+from src.config import RecognitionConfig
 from src.io_utils import (
     read_image,
     require_columns,
@@ -43,6 +44,12 @@ def main() -> None:
         "--output", type=Path, default=Path("artifacts/ocr_metrics.json"), help="Tệp JSON lưu kết quả chỉ số"
     )
     parser.add_argument("--cpu", action="store_true", help="Ép buộc chạy trên CPU")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/recognition.yaml"),
+        help="Tệp cấu hình nhận diện dùng chung với API và CLI predict",
+    )
     args = parser.parse_args()
 
     frame = pd.read_csv(args.annotations, dtype=str).fillna("")
@@ -57,13 +64,14 @@ def main() -> None:
 
     logger.info("Khởi tạo EasyOCR Reader (GPU=%s)...", torch.cuda.is_available() and not args.cpu)
     reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available() and not args.cpu)
+    config = RecognitionConfig.from_yaml(args.config) if args.config.is_file() else RecognitionConfig()
     raw_pairs, suggestion_pairs, rows = [], [], []
     base_directory = args.annotations.resolve().parent
 
     for row in frame.itertuples(index=False):
         crop_path = resolve_relative_path(row.crop_path, base_directory)
         image = read_image(crop_path, "tệp ảnh crop")
-        result = read_plate(reader, image, getattr(row, "layout", "auto") or "auto")
+        result = read_plate(reader, image, getattr(row, "layout", "auto") or "auto", config=config)
         raw_pairs.append((row.plate_text, result["raw_text"]))
         suggestion_pairs.append((row.plate_text, result.get("correction_suggestion") or result["raw_text"]))
         rows.append({"crop_path": str(crop_path), "ground_truth": row.plate_text, **result})

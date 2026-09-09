@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.config import RecognitionConfig
 from src.error_analysis import classify_error, generate_error_analysis_report
 from src.grammar import normalize_plate_text
 from src.io_utils import (
@@ -60,6 +61,12 @@ def main() -> None:
         "--iou-threshold", type=float, default=0.5, help="Ngưỡng IoU coi như khớp bounding box"
     )
     parser.add_argument("--cpu", action="store_true", help="Ép buộc thực thi trên CPU")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/recognition.yaml"),
+        help="Tệp cấu hình nhận diện dùng chung với API và CLI predict",
+    )
     args = parser.parse_args()
 
     frame = pd.read_csv(args.annotations)
@@ -73,7 +80,8 @@ def main() -> None:
     )
 
     logger.info("Khởi tạo pipeline LicensePlateRecognizer...")
-    recognizer = LicensePlateRecognizer(args.weights, gpu=False if args.cpu else None)
+    config = RecognitionConfig.from_yaml(args.config) if args.config.is_file() else RecognitionConfig()
+    recognizer = LicensePlateRecognizer(args.weights, gpu=False if args.cpu else None, config=config)
     base_directory = args.annotations.resolve().parent
     records, latencies = [], []
 
@@ -105,6 +113,7 @@ def main() -> None:
                 raw_pred=prediction.get("raw_text", ""),
                 corrected_pred=prediction.get("accepted_text", ""),
                 detected=matched,
+                candidate_found=match.get("candidate_found", matched),
                 iou=best_iou,
                 iou_threshold=args.iou_threshold,
             )
@@ -124,6 +133,7 @@ def main() -> None:
                     "ocr_consensus_ratio": prediction.get("ocr_consensus_ratio", 0.0),
                     "bootstrap_group": bootstrap_group,
                     "detected": matched,
+                    "candidate_found": match.get("candidate_found", matched),
                     "iou": best_iou,
                     "error_type": error_type,
                 }

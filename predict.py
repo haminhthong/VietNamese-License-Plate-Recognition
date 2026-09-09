@@ -5,7 +5,8 @@ import json
 import logging
 from pathlib import Path
 
-from src.pipeline import LicensePlateRecognizer, RecognitionConfig
+from src.config import RecognitionConfig
+from src.pipeline import LicensePlateRecognizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -24,18 +25,24 @@ def main() -> None:
     )
     parser.add_argument("--cpu", action="store_true", help="Ép buộc thực thi trên CPU")
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/recognition.yaml"),
+        help="Tệp cấu hình nhận diện dùng chung với API và đánh giá",
+    )
+    parser.add_argument(
         "--candidate-confidence",
         type=float,
-        default=0.10,
+        default=None,
         help="Ngưỡng thấp để giữ candidate detector cho decision policy",
     )
     parser.add_argument(
         "--accept-confidence",
         type=float,
-        default=0.50,
+        default=None,
         help="Ngưỡng detector tối thiểu để AUTO_ACCEPT",
     )
-    parser.add_argument("--ocr-threshold", type=float, default=0.65, help="Ngưỡng OCR để AUTO_ACCEPT")
+    parser.add_argument("--ocr-threshold", type=float, default=None, help="Ngưỡng OCR để AUTO_ACCEPT")
     parser.add_argument(
         "--confidence",
         type=float,
@@ -43,10 +50,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = RecognitionConfig(
-        detector_candidate_threshold=args.candidate_confidence
-        if args.confidence is None
-        else args.confidence,
+    config = RecognitionConfig.from_yaml(args.config) if args.config.is_file() else RecognitionConfig()
+    config = config.override(
+        detector_candidate_threshold=(
+            args.confidence if args.confidence is not None else args.candidate_confidence
+        ),
         auto_accept_detector_threshold=args.accept_confidence,
         ocr_threshold=args.ocr_threshold,
     )

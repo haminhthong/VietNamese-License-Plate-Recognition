@@ -17,25 +17,32 @@ def classify_error(
     detected: bool,
     iou: float,
     iou_threshold: float = 0.5,
+    candidate_found: bool | None = None,
 ) -> str:
     """Phân loại nhóm nguyên nhân lỗi cho từng mẫu nhận diện theo Error Taxonomy tiêu chuẩn:
     - correct: Dự đoán đúng 100%
-    - detector_miss: Detector bỏ sót hoàn toàn biển số
+    - detector_miss: Không có candidate chồng lấn biển số hoặc candidate đã ghép cho biển khác
     - iou_poor: Bounding box có IoU thấp (< iou_threshold)
-    - template_over_correction: Hậu xử lý template làm sai kết quả raw OCR vốn đúng
+    - decision_abstain: Raw OCR đúng nhưng policy REVIEW/REJECT không xuất accepted text
+    - template_over_correction: Hậu xử lý làm sai kết quả raw OCR vốn đúng (tên tương thích legacy)
     - ocr_wrong: Lỗi nhận dạng OCR ký tự
     """
     gt_norm = normalize_plate_text(ground_truth)
     raw_norm = normalize_plate_text(raw_pred)
     corr_norm = normalize_plate_text(corrected_pred)
 
-    if not detected:
+    has_candidate = detected if candidate_found is None else candidate_found
+    if not has_candidate:
         return "detector_miss"
     if iou < iou_threshold:
         return "iou_poor"
+    if not detected:
+        return "detector_miss"
     if corr_norm == gt_norm:
         return "correct"
     if raw_norm == gt_norm and corr_norm != gt_norm:
+        if not corr_norm:
+            return "decision_abstain"
         return "template_over_correction"
     return "ocr_wrong"
 
@@ -54,6 +61,7 @@ def generate_error_analysis_report(
                 row.get("accepted_prediction", row.get("corrected_prediction", "")),
                 row["detected"],
                 row.get("iou", 1.0),
+                candidate_found=row.get("candidate_found"),
             )
             for _, row in df.iterrows()
         ]

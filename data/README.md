@@ -11,7 +11,8 @@ Trước khi công bố dữ liệu, phải ghi rõ nguồn, phiên bản, giấ
 Tách dữ liệu đánh giá thành hai file độc lập: `e2e/development.csv` để tune
 padding/preprocessing/rectification/threshold và `e2e/test.csv` đã khóa để báo
 cáo final. Mỗi file cần `image_path,x1,y1,x2,y2,plate_text,split`; giá trị
-`split` tương ứng phải là `development` hoặc `test`. Có thể thêm
+`split` tương ứng phải là `dev` hoặc `test` vì evaluator dùng đúng hai giá trị
+này. Có thể thêm
 `plate_identity`, `capture_group` và `layout` để bootstrap theo đơn vị độc lập.
 
 `evaluate_ablation.py` chỉ đọc development. `evaluate_end_to_end.py` chỉ đọc

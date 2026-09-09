@@ -31,7 +31,8 @@ app = FastAPI(
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 UI_HTML_PATH = Path(__file__).parent / "ui.html"
-INFERENCE_SEMAPHORE = asyncio.Semaphore(4)
+MAX_CONCURRENT_INFERENCE = max(1, int(os.getenv("MAX_CONCURRENT_INFERENCE", "1")))
+INFERENCE_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_INFERENCE)
 
 
 def model_weights_path() -> Path:
@@ -45,8 +46,8 @@ def get_recognizer() -> LicensePlateRecognizer:
     weights = model_weights_path()
     if not weights.is_file():
         raise FileNotFoundError(f"Không tìm thấy tệp trọng số mô hình YOLOv8: {weights}")
-    config_path = os.getenv("RECOGNITION_CONFIG")
-    config = RecognitionConfig.from_yaml(config_path) if config_path else RecognitionConfig()
+    config_path = Path(os.getenv("RECOGNITION_CONFIG", "configs/recognition.yaml"))
+    config = RecognitionConfig.from_yaml(config_path) if config_path.is_file() else RecognitionConfig()
     return LicensePlateRecognizer(weights, config=config)
 
 
@@ -90,7 +91,7 @@ async def predict(image: Annotated[UploadFile, File()]) -> PredictionResponse:
     """Nhận tệp ảnh tải lên (JPEG/PNG/WebP max 10MB) và thực hiện nhận diện biển số end-to-end."""
     if image.content_type not in SUPPORTED_IMAGE_TYPES:
         raise HTTPException(status_code=415, detail="Chỉ hỗ trợ các định dạng ảnh JPEG, PNG hoặc WebP.")
-    payload = await image.read()
+    payload = await image.read(MAX_UPLOAD_BYTES + 1)
     if not payload:
         raise HTTPException(status_code=400, detail="Tệp ảnh tải lên bị rỗng.")
     if len(payload) > MAX_UPLOAD_BYTES:
@@ -100,7 +101,7 @@ async def predict(image: Annotated[UploadFile, File()]) -> PredictionResponse:
         raise HTTPException(status_code=400, detail="Dữ liệu tệp không phải là hình ảnh hợp lệ.")
     try:
         recognizer = get_recognizer()
-    except FileNotFoundError as error:
+    except (FileNotFoundError, ValueError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
     try:
