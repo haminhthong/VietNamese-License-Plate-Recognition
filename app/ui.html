@@ -67,7 +67,7 @@
     <div class="container">
         <header>
             <h1>Vietnamese License Plate Recognition</h1>
-            <p>Hệ thống nhận diện biển số xe Việt Nam End-to-End (YOLOv8 + EasyOCR + Post-processing)</p>
+            <p>Hệ thống nhận diện biển số xe Việt Nam End-to-End (YOLOv8 + EasyOCR)</p>
         </header>
 
         <div class="grid">
@@ -204,39 +204,39 @@
 
             let html = `<div class="meta-item" style="margin-bottom: 1rem;">⏱️ Thời gian xử lý: <strong>${data.latency_ms.toFixed(1)} ms</strong> | Đã tìm thấy: <strong>${data.predictions.length} biển số</strong></div>`;
 
-            data.predictions.forEach((pred, index) => {
+            data.predictions.forEach((pred) => {
                 const [x1, y1, x2, y2] = pred.box;
                 const width = x2 - x1;
                 const height = y2 - y1;
 
                 // Vẽ hình chữ nhật
+                ctx.strokeStyle = pred.needs_review ? '#f59e0b' : '#22c55e';
                 ctx.strokeRect(x1, y1, width, height);
 
                 // Vẽ label trên canvas
-                const label = pred.accepted_text || pred.raw_text || "Unrecognized";
+                const label = pred.text || "Unreadable";
+                ctx.fillStyle = pred.needs_review ? '#f59e0b' : '#22c55e';
                 ctx.fillRect(x1, Math.max(0, y1 - 30), ctx.measureText(label).width + 10, 30);
                 ctx.fillStyle = '#000000';
                 ctx.fillText(label, x1 + 5, Math.max(22, y1 - 8));
-                ctx.fillStyle = '#22c55e';
 
                 // Render Card Kết quả bên phải
+                const badgeClass = !pred.needs_review ? 'badge-success' : 'badge-warning';
+                const badgeText = pred.format_valid ? 'HỢP LỆ' : (pred.needs_review ? 'CẦN KIỂM TRA' : 'KHÔNG XÁC ĐỊNH');
+
                 html += `
                     <div class="plate-card">
                         <div class="plate-header">
-                            <div class="plate-number">${pred.accepted_text || pred.raw_text || "[KHÔNG ĐỌC ĐƯỢC]"}</div>
-                            <span class="badge ${pred.decision === 'ACCEPT' ? 'badge-success' : 'badge-warning'}">
-                                ${pred.decision || 'REVIEW'}
-                            </span>
+                            <div class="plate-number">${pred.text || "[KHÔNG ĐỌC ĐƯỢC]"}</div>
+                            <span class="badge ${badgeClass}">${badgeText}</span>
                         </div>
                         <div class="meta-grid">
                             <div class="meta-item">Độ tin cậy YOLO: <strong>${(pred.detection_confidence * 100).toFixed(1)}%</strong></div>
                             <div class="meta-item">Độ tin cậy OCR: <strong>${(pred.ocr_confidence * 100).toFixed(1)}%</strong></div>
-                            <div class="meta-item">Bố cục suy luận: <strong>${pred.layout === '1_line' ? '1 Dòng (Biển dài)' : '2 Dòng (Xe máy/Vuông)'}</strong></div>
-                            <div class="meta-item">Nắn góc phối cảnh: <strong>${pred.rectified ? 'Đã nắn góc' : 'Crop gốc'}</strong></div>
-                            <div class="meta-item">Chuỗi OCR thô: <strong>${pred.raw_text || 'N/A'}</strong></div>
-                            <div class="meta-item">Đề xuất sửa: <strong>${pred.correction_suggestion || 'Không có'}</strong></div>
-                            <div class="meta-item">Lý do review: <strong>${(pred.review_reasons || []).join(', ') || 'Không có'}</strong></div>
-                            <div class="meta-item">Biến thể ảnh chọn: <strong>${pred.variant || 'N/A'}</strong></div>
+                            <div class="meta-item">Bố cục: <strong>${pred.layout === '1_line' ? '1 Dòng (Biển dài)' : '2 Dòng (Vuông / Xe máy)'}</strong></div>
+                            <div class="meta-item">Đúng cú pháp VN: <strong>${pred.format_valid ? 'Đúng' : 'Sai'}</strong></div>
+                            <div class="meta-item">Gợi ý sửa ký tự: <strong>${pred.suggested_text || 'Không có'}</strong></div>
+                            <div class="meta-item">Trạng thái: <strong>${pred.needs_review ? 'Cần xem xét lại' : 'Tự động chấp nhận'}</strong></div>
                         </div>
                     </div>
                 `;

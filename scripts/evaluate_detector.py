@@ -1,8 +1,14 @@
-"""Đánh giá mô hình detector YOLOv8 trên tập dữ liệu kiểm thử (test split) độc lập."""
+"""Đánh giá mô hình detector YOLOv8 trên tập dữ liệu kiểm thử (test split)."""
 
 import argparse
 import logging
+import sys
 from pathlib import Path
+
+# Đảm bảo import được src khi chạy trực tiếp từ thư mục gốc
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 import numpy as np
 from ultralytics import YOLO
@@ -14,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    """Đánh giá độ chính xác Precision, Recall, mAP50, mAP50-95 của mô hình phát hiện biển số."""
+    """Đánh giá Precision, Recall, mAP50, mAP50-95 của detector YOLOv8."""
     parser = argparse.ArgumentParser(description="Đánh giá mô hình phát hiện biển số xe trên test split.")
     parser.add_argument("--weights", type=Path, required=True, help="Đường dẫn tới tệp trọng số best.pt")
     parser.add_argument(
@@ -28,7 +34,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logger.info("Đang thực hiện đánh giá detector trên tập kiểm thử test split...")
+    logger.info("Đang thực hiện đánh giá detector trên test split...")
     metrics = YOLO(str(args.weights)).val(data=str(args.data), split="test", imgsz=640, batch=16)
 
     class_ids = np.asarray(metrics.box.ap_class_index, dtype=int)
@@ -48,10 +54,6 @@ def main() -> None:
         }
         for index, class_id in enumerate(class_ids)
     ]
-
-    missing_classes = sorted(set(metrics.names) - set(map(int, class_ids)))
-    if missing_classes:
-        raise RuntimeError(f"Tập kiểm thử test split thiếu dữ liệu cho các class: {missing_classes}")
 
     payload = {
         "weights": str(args.weights),

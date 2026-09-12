@@ -1,19 +1,16 @@
-# Data card
+# Hướng Dẫn Dữ Liệu (Data Guide)
 
-Repository không phân phối ảnh hoặc biển số riêng tư. Dữ liệu đầu vào phải ở định dạng YOLO với `train`, `valid`, `test`, mỗi tập có thư mục `images` và `labels`.
+Repository không phân phối ảnh hoặc biển số xe thực tế vì lý do bản quyền và quyền riêng tư. Dữ liệu huấn luyện và đánh giá cần được chuẩn bị theo cấu trúc sau:
 
-Mỗi dòng nhãn gồm `class_id x_center y_center width height`; project hiện chỉ hỗ trợ class `0: license_plate`. Chạy `prepare_dataset.py` để kiểm tra schema, ảnh lỗi, nhãn thiếu, duplicate MD5 và tạo split cố định theo nhóm nguồn. `split_manifest.csv` là artifact cần lưu cùng mỗi thí nghiệm.
+## 1. Dữ liệu huấn luyện YOLOv8
+Dữ liệu phát hiện biển số (Detector) tuân theo định dạng chuẩn của Ultralytics YOLO:
+- Thư mục gốc chứa `train/`, `val/`, `test/`.
+- Mỗi thư mục con chứa `images/` (ảnh JPG/PNG/WebP) và `labels/` (tệp TXT tương ứng).
+- Mỗi dòng nhãn có định dạng: `class_id x_center y_center width height` (chuẩn hóa trong khoảng [0, 1]).
+- Lớp đối tượng: `0: license_plate`.
 
-Trước khi công bố dữ liệu, phải ghi rõ nguồn, phiên bản, giấy phép, phạm vi đồng ý sử dụng và chính sách ẩn danh. Không đưa ảnh biển số thật lên repository nếu chưa có quyền. Metadata riêng cần có `capture_group`/`capture_session_id` và `plate_identity` hoặc `plate_identity_hash` để Protocol B hoạt động thật.
+Sử dụng script `python scripts/prepare_dataset.py --source data/raw --output dataset/grouped` để kiểm tra nhãn, phát hiện trùng lặp MD5 và chia tập an toàn theo nhóm camera/danh tính biển số nhằm tránh rò rỉ dữ liệu (Data Leakage).
 
-## Hợp đồng dữ liệu đánh giá E2E
-
-Tách dữ liệu đánh giá thành hai file độc lập: `e2e/development.csv` để tune
-padding/preprocessing/rectification/threshold và `e2e/test.csv` đã khóa để báo
-cáo final. Mỗi file cần `image_path,x1,y1,x2,y2,plate_text,split`; giá trị
-`split` tương ứng phải là `dev` hoặc `test` vì evaluator dùng đúng hai giá trị
-này. Có thể thêm
-`plate_identity`, `capture_group` và `layout` để bootstrap theo đơn vị độc lập.
-
-`evaluate_ablation.py` chỉ đọc development. `evaluate_end_to_end.py` chỉ đọc
-locked test. Cờ `--allow-unlocked-annotations` chỉ dành cho dữ liệu legacy.
+## 2. Dữ liệu đánh giá OCR & End-to-End
+- **Đánh giá OCR:** File CSV chứa các cột: `crop_path`, `plate_text`, và tùy chọn `layout` (`1_line` hoặc `2_line`). Xem file mẫu tại `data/ocr_annotations.example.csv`.
+- **Đánh giá End-to-End:** File CSV chứa các cột: `image_path`, `x1`, `y1`, `x2`, `y2`, `plate_text`. Xem file mẫu tại `data/end_to_end_annotations.example.csv`.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vietnamese-license-plate-recognition"
 version = "1.0.0"
-description = "End-to-end ALPR cho ảnh tĩnh từ camera/cổng kiểm soát tại Việt Nam"
+description = "Pipeline nhận diện biển số xe Việt Nam (YOLOv8 + EasyOCR)"
 requires-python = ">=3.11"
 dependencies = [
     "ultralytics==8.3.227",
@@ -24,26 +24,15 @@ dependencies = [
 dev = ["pytest>=8,<9", "ruff>=0.9,<1", "build>=1.2,<2", "httpx>=0.27,<1"]
 
 [project.scripts]
-vlpr-prepare = "prepare_dataset:main"
-vlpr-train = "train:main"
-vlpr-predict = "predict:main"
-vlpr-evaluate-detector = "evaluate_detector:main"
-vlpr-evaluate-ocr-dev = "evaluate_ocr:main"
-vlpr-evaluate-final = "evaluate_end_to_end:main"
-vlpr-evaluate-ablation = "evaluate_ablation:main"
+vlpr-prepare = "scripts.prepare_dataset:main"
+vlpr-train = "scripts.train:main"
+vlpr-predict = "scripts.predict:main"
+vlpr-evaluate-detector = "scripts.evaluate_detector:main"
+vlpr-evaluate-ocr = "scripts.evaluate_ocr:main"
+vlpr-evaluate-e2e = "scripts.evaluate_end_to_end:main"
 
 [tool.setuptools]
-packages = ["src", "app", "resources"]
-py-modules = [
-    "evaluate_ablation",
-    "evaluate_detector",
-    "evaluate_end_to_end",
-    "evaluate_ocr",
-    "export_model",
-    "predict",
-    "prepare_dataset",
-    "train",
-]
+packages = ["src", "app", "resources", "scripts"]
 
 [tool.setuptools.package-data]
 resources = ["*.yaml"]
@@ -60,3 +49,6 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["E402"]

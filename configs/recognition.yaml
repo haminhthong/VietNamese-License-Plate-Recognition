@@ -1,13 +1,11 @@
-# Ngưỡng thấp giữ candidate để decision layer còn cơ hội đưa sang REVIEW.
-detector_candidate_threshold: 0.10
-# Ngưỡng cao để tự động chấp nhận kết quả.
+# Cấu hình phát hiện và nhận diện biển số xe (YOLOv8 + EasyOCR)
+detection_confidence: 0.25
 auto_accept_detector_threshold: 0.50
 nms_iou: 0.60
 image_size: 640
 padding_ratio: 0.05
 ocr_minimum_confidence: 0.20
-ocr_threshold: 0.65
-ocr_consensus_threshold: 0.50
+ocr_threshold: 0.50
 wide_ratio_threshold: 2.20
 enable_rectification: true
 enable_preprocessing_variants: true
@@ -16,4 +14,3 @@ min_plate_width: 20
 min_plate_height: 8
 min_image_width: 160
 min_image_height: 120
-blur_threshold: 5.0
